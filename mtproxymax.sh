@@ -10441,7 +10441,13 @@ self_update() {
         fi
         if is_proxy_running; then
             load_secrets
-            restart_proxy_container
+            # Do not delete rollback images when restart fails or the new
+            # container is not running. The old container may have already been
+            # removed by restart_proxy_container; recovery still needs validation.
+            if ! restart_proxy_container || ! is_proxy_running; then
+                log_error "Telemt restart failed; retaining older Docker images for manual recovery"
+                return 1
+            fi
         fi
         # Clean up old engine images (keep only the current version + latest)
         local _old_img
