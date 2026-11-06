@@ -9737,7 +9737,34 @@ upgrade_proxy_container_with_rollback() {
 }
 
 # Coordinated upgrade: running secondary instances only, with group rollback.
+# Fail closed if flock is unavailable. The lock spans the entire upgrade.
 upgrade_all_proxy_instances_with_rollback() {
+    local _upgrade_lock_fd _upgrade_rc=0
+    if ! command -v flock >/dev/null 2>&1; then
+        log_error "Protected group upgrade requires flock"
+        return 1
+    fi
+    exec {_upgrade_lock_fd}>"${INSTALL_DIR}/.engine-group-upgrade.lock" || return 1
+    if ! flock -n "$_upgrade_lock_fd"; then
+        log_error "Another protected group upgrade is running"
+        exec {_upgrade_lock_fd}>&-
+        return 1
+    fi
+    _upgrade_all_proxy_instances_locked || _upgrade_rc=$?
+    flock -u "$_upgrade_lock_fd" 2>/dev/null || true
+    exec {_upgrade_lock_fd}>&-
+    return "$_upgrade_rc"
+}
+
+# Port readiness supplements Docker running/restart-count checks.
+_upgrade_instance_tcp_ready() {
+    local _port="$1"
+    [[ "$_port" =~ ^[0-9]+$ ]] || return 1
+    command -v timeout >/dev/null 2>&1 || return 1
+    timeout 2 bash -c 'exec 3<>/dev/tcp/127.0.0.1/"$1"' _ "$_port" >/dev/null 2>&1
+}
+
+_upgrade_all_proxy_instances_locked() {
     local original image snapshot i name port old cfg id restarts n failed=0 original_policy
     local original_port="$PROXY_PORT" original_metrics="$PROXY_METRICS_PORT"
     local -a names=() ports=() metrics=() ids=() backups=() policies=()
@@ -9783,8 +9810,22 @@ upgrade_all_proxy_instances_with_rollback() {
                [ "$(docker inspect -f '{{.RestartCount}}' "$name" 2>/dev/null)" != "$restarts" ]; then failed=1; break; fi
         done
         [ "$failed" = 0 ] || break
+        local _ready=false _attempt
+        for _attempt in 1 2 3 4 5 6; do
+            if _upgrade_instance_tcp_ready "$port"; then _ready=true; break; fi
+            sleep 1
+        done
+        if [ "$_ready" != true ]; then
+            log_error "Secondary instance $name failed TCP readiness on port $port"
+            failed=1
+            break
+        fi
     done
     PROXY_PORT="$original_port"; PROXY_METRICS_PORT="$original_metrics"
+    if [ "$failed" = 0 ] && ! _upgrade_instance_tcp_ready "$original_port"; then
+        log_error "Primary port $original_port not reachable after group upgrade"
+        failed=1
+    fi
     if [ "$failed" = 0 ]; then rm -rf "$snapshot"; return 0; fi
     for ((i=${#names[@]}-1;i>=0;i--)); do
         name="${names[$i]}"; port="${ports[$i]}"
@@ -9808,6 +9849,13 @@ upgrade_all_proxy_instances_with_rollback() {
         docker start "$CONTAINER_NAME" >/dev/null 2>&1 || failed=2
     else failed=2; fi
     if [ "$failed" = 2 ]; then
+        {
+            printf 'status=PARTIAL_ROLLBACK\nprimary_id=%s\nprimary_name=%s\n' "$original" "$CONTAINER_NAME"
+            for i in "${!names[@]}"; do
+                printf 'secondary_name=%s original_id=%s rollback_name=%s\n' "${names[$i]}" "${ids[$i]}" "${backups[$i]:-not-renamed}"
+            done
+        } > "$snapshot/RECOVERY.txt"
+        chmod 600 "$snapshot/RECOVERY.txt" 2>/dev/null || true
         log_error "Group rollback incomplete; retained snapshots at $snapshot"
     else rm -rf "$snapshot"; fi
     return 1
