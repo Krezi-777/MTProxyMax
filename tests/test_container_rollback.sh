@@ -53,6 +53,18 @@ check_case() (
         printf 'docker %s\n' "$*" >> "$work/calls"
         case "$1" in
             inspect)
+                # Rollback-name collision preflight uses plain inspect.
+                # Health probes use formatted inspect and must simulate the
+                # stable Docker ID and RestartCount of the replacement.
+                if [ "${2:-}" = "-f" ]; then
+                    [ "$new_exists" = true ] || return 1
+                    case "${3:-}" in
+                        '{{.Id}}') printf 'mock-new-container-id\\n' ;;
+                        '{{.RestartCount}}') printf '0\\n' ;;
+                        *) return 1 ;;
+                    esac
+                    return 0
+                fi
                 return 1 ;;
             update) return 0 ;;
             stop)
