@@ -185,11 +185,26 @@ _start_all_instances
 sleep 3
 test "$(command docker inspect -f '{{.State.Running}}' "$SECONDARY_CONTAINER")" = true
 secondary_id="$(command docker inspect -f '{{.Id}}' "$SECONDARY_CONTAINER")"
-python3 - <<'PY'
-import socket
-with socket.create_connection(('127.0.0.1',19082),timeout=3): pass
+if python3 - <<'PY'
+import socket,time
+for attempt in range(20):
+    try:
+        with socket.create_connection(('127.0.0.1',19082),timeout=2): pass
+        break
+    except OSError:
+        time.sleep(1)
+else:
+    raise SystemExit('secondary instance port 19082 not ready')
 PY
-echo '  PASS: real secondary instance starts with independent config and port'
+then
+    echo '  PASS: real secondary instance starts with independent config and port'
+else
+    echo 'DIAGNOSTICS: secondary instance launch failed' >&2
+    command docker ps -a --filter "name=$SECONDARY_CONTAINER" >&2 || true
+    command docker logs --tail 90 "$SECONDARY_CONTAINER" >&2 || true
+    command ss -ltnp 2>&1 | grep -E '19082|19192|State' >&2 || true
+    return 1
+fi
 
 FAIL_DOCKER_RUN=1
 if upgrade_proxy_container_with_rollback; then
