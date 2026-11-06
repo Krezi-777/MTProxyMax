@@ -19,11 +19,11 @@ The development branch also adds guarded engine replacement, selected rollback/r
 | Telemt source revision used in tests | `84e5b82` (Telemt 3.5.16) |
 | Release tag | **NOT CREATED** |
 | Published Docker image | **NONE** |
-| Reviewed `mtproxymax.sh` SHA-256 | **NOT YET RECORDED** |
+| Preliminary `mtproxymax.sh` SHA-256 | `aa527da3314d29ec9ed5e59ca09a1e0c96d1fd5db397c5f705c4831cce1abf7e` — calculated from GitHub API UTF-8 content; **raw-download independent verification pending** |
 | Release package checksum | **NOT YET RECORDED** |
 | Published install command | **NONE** |
 
-The release commit cannot be finalized until the documentation and remaining changes stop moving. A Git commit SHA identifies a source-tree revision; it is **not** the SHA-256 digest of the raw manager script or a Docker image.
+The preliminary script digest is computed from the GitHub connector's decoded UTF-8 content using a SHA-256 implementation verified against a standard known-answer vector. It has **not** been independently compared with a raw HTTPS download or signed artifact and is not yet approved for an installer command. The release commit cannot be finalized until the documentation and remaining changes stop moving. A Git commit SHA identifies a source-tree revision; it is **not** the SHA-256 digest of the raw manager script or a Docker image.
 
 ## Test evidence (development, not operational deployment)
 
