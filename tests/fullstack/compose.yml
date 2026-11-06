@@ -26,9 +26,6 @@ services:
     networks: [test_net]
     volumes:
       - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
-    ports:
-      - "127.0.0.1:18081:18081"
-      - "127.0.0.1:18404:8404"
     security_opt:
       - no-new-privileges:true
     cap_drop:
