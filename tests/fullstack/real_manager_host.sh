@@ -14,6 +14,8 @@ base="$RUNNER_TEMP/mtproxy-real-manager-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
 CONFIG_DIR="$base/config"
 INSTALL_DIR="$base/install"
 CONTAINER_NAME="mtproxy-real-manager-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+SECONDARY_CONTAINER="mtproxymax-19082"
+INSTANCES_FILE="$base/instances.conf"
 haproxy_name="$CONTAINER_NAME-haproxy"
 DOCKER_IMAGE_BASE=mtproxymax-telemt
 TELEMT_MIN_VERSION=3.5.16
@@ -50,7 +52,7 @@ mkdir -p "$CONFIG_DIR" "$INSTALL_DIR"
 printf '3.5.16-84e5b82\n' > "$INSTALL_DIR/.telemt_version"
 
 cleanup() {
-    command docker rm -f "$CONTAINER_NAME" "$haproxy_name" >/dev/null 2>&1 || true
+    command docker rm -f "$CONTAINER_NAME" "$haproxy_name" "$SECONDARY_CONTAINER" >/dev/null 2>&1 || true
     local name
     while IFS= read -r name; do
         case "$name" in
@@ -67,7 +69,7 @@ trap cleanup EXIT
 fn="$base/production-functions.sh"
 for item in 'get_telemt_version() {' 'get_docker_image() {' \
             'generate_telemt_config() {' 'run_proxy_container() {' \
-            'upgrade_proxy_container_with_rollback() {'; do
+            '_start_all_instances() {' 'upgrade_proxy_container_with_rollback() {'; do
     awk -v header="$item" '
         $0==header {active=1}
         active {print}
@@ -96,7 +98,12 @@ maintenance_reapply() { :; }
 _startup_warnings() { :; }
 telegram_notify_proxy_started() { :; }
 flush_traffic_to_disk() { :; }
-_start_all_instances() { :; }
+load_instances() {
+    INSTANCE_PORTS=(19082)
+    INSTANCE_METRICS_PORTS=(19192)
+    INSTANCE_ENABLED=(true)
+    INSTANCE_LABELS=(isolated-secondary)
+}
 apply_firewall_rules() { :; }
 speed_limit_apply() { :; }
 # The actual run_proxy_container uses docker run. Fault injection intercepts only
@@ -171,6 +178,19 @@ old_id="$(command docker inspect -f '{{.Id}}' "$CONTAINER_NAME")"
 old_sha="$(sha256sum "$CONFIG_DIR/config.toml" | cut -d' ' -f1)"
 echo '  PASS: genuine manager run_proxy_container and generate_telemt_config with host networking'
 
+# Check the real multi-instance start routine. Existing instances must survive
+# primary engine updates; version consistency is a separate release gate.
+printf '19082|19192|true|isolated-secondary\n' > "$INSTANCES_FILE"
+_start_all_instances
+sleep 3
+test "$(command docker inspect -f '{{.State.Running}}' "$SECONDARY_CONTAINER")" = true
+secondary_id="$(command docker inspect -f '{{.Id}}' "$SECONDARY_CONTAINER")"
+python3 - <<'PY'
+import socket
+with socket.create_connection(('127.0.0.1',19082),timeout=3): pass
+PY
+echo '  PASS: real secondary instance starts with independent config and port'
+
 FAIL_DOCKER_RUN=1
 if upgrade_proxy_container_with_rollback; then
     echo 'FAIL: broken replacement unexpectedly accepted' >&2; exit 1
@@ -180,6 +200,7 @@ is_proxy_running
 test "$(command docker inspect -f '{{.Id}}' "$CONTAINER_NAME")" = "$old_id"
 test "$(sha256sum "$CONFIG_DIR/config.toml" | cut -d' ' -f1)" = "$old_sha"
 health
+test "$(command docker inspect -f '{{.Id}}' "$SECONDARY_CONTAINER")" = "$secondary_id"
 echo '  PASS: genuine launch failure restored original container and config with HAProxy UP'
 
 upgrade_proxy_container_with_rollback
@@ -190,5 +211,8 @@ backup="$(command docker ps -a --format '{{.Names}}' | grep -E "^$CONTAINER_NAME
 test -n "$backup"
 test "$(command docker inspect -f '{{.Id}}' "$backup")" = "$old_id"
 health
+test "$(command docker inspect -f '{{.Id}}' "$SECONDARY_CONTAINER")" = "$secondary_id"
+test "$(command docker inspect -f '{{.State.Running}}' "$SECONDARY_CONTAINER")" = true
 echo '  PASS: genuine manager upgrade retained old container and HAProxy remained UP'
-echo 'PASS: production launch path and rollback on isolated GitHub runner (3/3)'
+echo '  PASS: active secondary instance preserved across primary restart (no secondary upgrade performed)'
+echo 'PASS: primary production launch and multi-instance continuity on isolated GitHub runner (5/5)'
