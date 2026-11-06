@@ -1,0 +1,41 @@
+services:
+  telemt:
+    image: telemt:fullstack-test
+    container_name: ${PROXY_CONTAINER:?PROXY_CONTAINER required}
+    command: ["/etc/telemt/config.toml"]
+    networks:
+      test_net:
+        aliases: [telemt]
+    volumes:
+      - ./config:/etc/telemt:ro
+    working_dir: /run/telemt
+    read_only: true
+    tmpfs:
+      - /run/telemt:rw,size=4m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    restart: "no"
+
+  haproxy:
+    image: haproxy:3.1-alpine
+    container_name: ${HAPROXY_CONTAINER:?HAPROXY_CONTAINER required}
+    depends_on:
+      - telemt
+    networks: [test_net]
+    volumes:
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    ports:
+      - "127.0.0.1:18081:18081"
+      - "127.0.0.1:18404:8404"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    restart: "no"
+
+networks:
+  test_net:
+    name: ${TEST_NETWORK:?TEST_NETWORK required}
+    internal: true
