@@ -10030,7 +10030,7 @@ reload_proxy_config() {
             local inst_config="${CONFIG_DIR}/config-${INSTANCE_PORTS[$i]}.toml"
             PROXY_PORT="${INSTANCE_PORTS[$i]}"
             PROXY_METRICS_PORT="${INSTANCE_METRICS_PORTS[$i]}"
-            generate_telemt_config "$inst_config"
+            TELEMT_SECONDARY_INSTANCE=true generate_telemt_config "$inst_config"
             _instance_container_running "mtproxymax-${INSTANCE_PORTS[$i]}" || continue
             docker kill -s SIGHUP "mtproxymax-${INSTANCE_PORTS[$i]}" 2>/dev/null \
                 || log_warn "Instance ${INSTANCE_PORTS[$i]}: could not signal the engine to reload"
