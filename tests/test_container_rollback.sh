@@ -14,13 +14,14 @@ check_case() (
     local work="$tmp/$scenario"
     mkdir -p "$work"
     CONTAINER_NAME=mtproxymax
+    CONFIG_DIR="$work"
     old_name=mtproxymax
     old_running=true
     new_exists=false
     new_running=false
     backup_name=""
-    printf 'config-original\n' > "$work/config"
-    cp "$work/config" "$work/config.before"
+    printf 'config-original\n' > "$work/config.toml"
+    cp "$work/config.toml" "$work/config.before"
     : > "$work/calls"
 
     log_info() { :; }
@@ -41,6 +42,7 @@ check_case() (
     run_proxy_container() {
         printf '%s\n' run_proxy_container >> "$work/calls"
         new_exists=true
+        printf "config-modified\\n" > "$work/config.toml"
         case "$scenario" in
             start-fails) new_running=false; return 1 ;;
             new-crashes) new_running=false; return 0 ;;
@@ -97,7 +99,11 @@ check_case() (
         test "$old_name" = "$CONTAINER_NAME"
         test "$new_exists" = false
     fi
-    cmp -s "$work/config" "$work/config.before"
+    if [ "$scenario" = success ]; then
+        grep -Fq "config-modified" "$work/config.toml"
+    else
+        cmp -s "$work/config.toml" "$work/config.before"
+    fi
     ! grep -q '^docker rmi ' "$work/calls"
     printf '  PASS: %s\n' "$scenario"
 )
