@@ -10372,7 +10372,21 @@ self_update() {
     fi
 
     local _script_updated=false
-    local _url="https://raw.githubusercontent.com/${GITHUB_REPO}/main/mtproxymax.sh"
+    # Fork updates require an explicit immutable commit and expected SHA256.
+    # Without an opt-in, retain upstream update checking but block replacement.
+    local _update_repo="${GITHUB_REPO}" _update_ref="main" _expected_script_sha=""
+    if [ -n "${MTPROXYMAX_FORK_UPDATE_COMMIT:-}" ]; then
+        _update_repo="Krezi-777/MTProxyMax"
+        _update_ref="${MTPROXYMAX_FORK_UPDATE_COMMIT}"
+        _expected_script_sha="${MTPROXYMAX_FORK_UPDATE_SHA256:-}"
+        if [[ ! "$_update_ref" =~ ^[0-9a-fA-F]{40}$ ]] ||
+           [[ ! "$_expected_script_sha" =~ ^[0-9a-fA-F]{64}$ ]]; then
+            log_error "Fork script update requires pinned 40-hex commit and 64-hex SHA256"
+            return 1
+        fi
+        _expected_script_sha="${_expected_script_sha,,}"
+    fi
+    local _url="https://raw.githubusercontent.com/${_update_repo}/${_update_ref}/mtproxymax.sh"
 
     echo ""
     log_info "Checking for script updates..."
@@ -10382,6 +10396,15 @@ self_update() {
 
     if curl -fsSL --max-time 60 --max-filesize 5242880 -o "$_tmp" "$_url" 2>/dev/null; then
         # Validate: bash syntax + sanity check
+        if [ -n "$_expected_script_sha" ]; then
+            local _actual_script_sha
+            _actual_script_sha=$(sha256sum "$_tmp" | cut -d' ' -f1)
+            if [ "$_actual_script_sha" != "$_expected_script_sha" ]; then
+                log_error "Fork update SHA256 mismatch; downloaded script was not executed"
+                rm -f "$_tmp"
+                return 1
+            fi
+        fi
         if ! bash -n "$_tmp" 2>/dev/null; then
             log_error "Downloaded script has syntax errors — aborting"
             rm -f "$_tmp"; return 1
@@ -10410,9 +10433,17 @@ self_update() {
             rm -f "$_tmp" "$_UPDATE_BADGE"
             # Update stored SHA so background check doesn't re-trigger the badge
             local _new_sha
-            _new_sha=$(curl -fsSL --connect-timeout 5 --max-time 10 \
-                "https://api.github.com/repos/${GITHUB_REPO}/commits/main" \
-                -H "Accept: application/vnd.github.sha" 2>/dev/null) || true
+            if [ -n "$_expected_script_sha" ]; then
+                _new_sha="$_update_ref"
+            else
+                if [ -n "$_expected_script_sha" ]; then
+                    _new_sha="$_update_ref"
+                else
+                    _new_sha=$(curl -fsSL --connect-timeout 5 --max-time 10 \
+                        "https://api.github.com/repos/${GITHUB_REPO}/commits/main" \
+                        -H "Accept: application/vnd.github.sha" 2>/dev/null) || true
+                fi
+            fi
             [ -n "$_new_sha" ] && [ ${#_new_sha} -ge 40 ] && echo "${_new_sha:0:40}" > "$_UPDATE_SHA_FILE" 2>/dev/null || true
             # Detect stale in-memory version (file on disk is newer than running process)
             if [ -n "$_new_ver" ] && [ "$_new_ver" != "$VERSION" ]; then
@@ -10428,7 +10459,7 @@ self_update() {
                 rm -f "$_tmp"
             else
                 # Fork safety: never overwrite modified script with upstream by default.
-                if [ "${MTPROXYMAX_ALLOW_UPSTREAM_OVERWRITE:-0}" != "1" ]; then
+                if [ -z "$_expected_script_sha" ] && [ "${MTPROXYMAX_ALLOW_UPSTREAM_OVERWRITE:-0}" != "1" ]; then
                     log_error "Upstream script replacement disabled in this fork. Set MTPROXYMAX_ALLOW_UPSTREAM_OVERWRITE=1 only to opt in explicitly."
                     rm -f "$_tmp"
                     return 1
