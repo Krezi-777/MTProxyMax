@@ -18,26 +18,26 @@ Addresses the shell compatibility failure discussed in [upstream issue #162](htt
 
 ## Verification
 
-For source commit `06d88bf0d093b926cbcd48e9d0e27d27bfee542a`, GitHub Actions reports **SUCCESS** for all four workflow groups:
+For source commit `05aa2d05128f179043fa33f49a3c09bb48f30ee3`, GitHub Actions reports **SUCCESS** for all four workflow groups:
 
 | Workflow | Run |
 | --- | --- |
-| CI | [42201261539](https://github.com/Krezi-777/MTProxyMax/actions/runs/42201261539) |
-| Full Stack Integration | [42201261534](https://github.com/Krezi-777/MTProxyMax/actions/runs/42201261534) |
-| Real Docker Rollback | [42201261676](https://github.com/Krezi-777/MTProxyMax/actions/runs/42201261676) |
-| Telemt Smoke | [42201261589](https://github.com/Krezi-777/MTProxyMax/actions/runs/42201261589) |
+| CI | [42210866342](https://github.com/Krezi-777/MTProxyMax/actions/runs/42210866342) |
+| Full Stack Integration | [42210866430](https://github.com/Krezi-777/MTProxyMax/actions/runs/42210866430) |
+| Real Docker Rollback | [42210866367](https://github.com/Krezi-777/MTProxyMax/actions/runs/42210866367) |
+| Telemt Smoke | [42210866405](https://github.com/Krezi-777/MTProxyMax/actions/runs/42210866405) |
 
 The full-stack test uses genuine manager functions and host-network Docker on a disposable GitHub runner, but stubs side-effectful host management helpers. It checks primary HAProxy backend health and primary/secondary TCP listeners and injects failure into secondary upgrade and rollback. It does **not** prove real Telegram client traffic, every HAProxy backend in the actual target topology or complete recovery from every interruption.
 
 ## Unresolved safety / release gates
 
-- No shared transaction lock against concurrent updates or instance changes.
-- Readiness checks inside group update rely mainly on Docker status and restart-count stability rather than per-instance end-to-end traffic acceptance.
-- Partial rollback and crash interruption recovery are not fully reconciled automatically.
+- Group updates now have an exclusive `flock`, but unrelated management operations are not synchronized with that lock.
+- Group-upgrade code tests TCP readiness and Docker stability, but does not validate real MTProto client traffic or every HAProxy backend.
+- Unresolved rollback snapshots block new group upgrades, and recovery manifests are retained; fully automatic crash reconciliation is not implemented.
 - Actual production Telegram client traffic and HAProxy layout remain unverified.
 - Reviewed immutable public release tag, source checksum, install instructions and artifact provenance are not finalized.
 
-See [release readiness audit](RELEASE_READINESS_AUDIT.md).
+See the [release readiness audit](RELEASE_READINESS_AUDIT.md), [unpublished release candidate page](RELEASE_CANDIDATE.md) and [recovery runbook](GROUP_UPGRADE_RECOVERY_RUNBOOK.md).
 
 ## Distribution and attribution
 
