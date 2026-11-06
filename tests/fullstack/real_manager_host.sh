@@ -56,7 +56,7 @@ cleanup() {
     local name
     while IFS= read -r name; do
         case "$name" in
-            "$CONTAINER_NAME-rollback-"*) command docker rm -f "$name" >/dev/null 2>&1 || true ;;
+            "$CONTAINER_NAME-rollback-"*|"$SECONDARY_CONTAINER-rollback-"*) command docker rm -f "$name" >/dev/null 2>&1 || true ;;
         esac
     done < <(command docker ps -a --format '{{.Names}}' || true)
     rm -rf "$base"
@@ -69,7 +69,8 @@ trap cleanup EXIT
 fn="$base/production-functions.sh"
 for item in 'get_telemt_version() {' 'get_docker_image() {' \
             'generate_telemt_config() {' 'run_proxy_container() {' \
-            '_start_all_instances() {' 'upgrade_proxy_container_with_rollback() {'; do
+            '_start_all_instances() {' 'upgrade_proxy_container_with_rollback() {' \
+            'upgrade_all_proxy_instances_with_rollback() {'; do
     awk -v header="$item" '
         $0==header {active=1}
         active {print}
@@ -231,3 +232,38 @@ test "$(command docker inspect -f '{{.State.Running}}' "$SECONDARY_CONTAINER")" 
 echo '  PASS: genuine manager upgrade retained old container and HAProxy remained UP'
 echo '  PASS: active secondary instance preserved across primary restart (no secondary upgrade performed)'
 echo 'PASS: primary production launch and multi-instance continuity on isolated GitHub runner (5/5)'
+
+# Group upgrade: the original secondary must also be replaced and retained.
+before_group_secondary=$(command docker inspect -f '{{.Id}}' "$SECONDARY_CONTAINER")
+upgrade_all_proxy_instances_with_rollback
+health
+after_group_secondary=$(command docker inspect -f '{{.Id}}' "$SECONDARY_CONTAINER")
+test "$before_group_secondary" != "$after_group_secondary"
+test "$(command docker inspect -f '{{.State.Running}}' "$SECONDARY_CONTAINER")" = true
+test "$(command docker inspect -f '{{.Id}}' "$CONTAINER_NAME")" != "$new_id"
+echo '  PASS: group upgrade replaced both running instances'
+
+# Inject a failure ONLY on the secondary Docker launch, after the primary
+# replacement succeeds. Both original container IDs must be restored.
+before_fail_primary=$(command docker inspect -f '{{.Id}}' "$CONTAINER_NAME")
+before_fail_secondary=$(command docker inspect -f '{{.Id}}' "$SECONDARY_CONTAINER")
+before_fail_primary_config=$(sha256sum "$CONFIG_DIR/config.toml" | cut -d' ' -f1)
+before_fail_secondary_config=$(sha256sum "$CONFIG_DIR/config-19082.toml" | cut -d' ' -f1)
+docker() {
+    if [ "$1" = run ] && [[ " $* " == *" --name $SECONDARY_CONTAINER "* ]]; then
+        echo 'Injected secondary update failure' >&2
+        return 51
+    fi
+    command docker "$@"
+}
+if upgrade_all_proxy_instances_with_rollback; then
+    echo 'FAIL: group upgrade accepted failed secondary launch' >&2; exit 1
+fi
+unset -f docker
+test "$(command docker inspect -f '{{.Id}}' "$CONTAINER_NAME")" = "$before_fail_primary"
+test "$(command docker inspect -f '{{.Id}}' "$SECONDARY_CONTAINER")" = "$before_fail_secondary"
+test "$(sha256sum "$CONFIG_DIR/config.toml" | cut -d' ' -f1)" = "$before_fail_primary_config"
+test "$(sha256sum "$CONFIG_DIR/config-19082.toml" | cut -d' ' -f1)" = "$before_fail_secondary_config"
+health
+echo '  PASS: failed secondary update restores both original Docker IDs and configs'
+
