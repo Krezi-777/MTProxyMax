@@ -333,4 +333,14 @@ grep -q '^status=PARTIAL_ROLLBACK' "$recovery_manifest"
 grep -q '^primary_id=' "$recovery_manifest"
 echo '  PASS: rollback failure is reported; old Docker ID and snapshots retained'
 
+# A pending incomplete transaction must block later upgrades without mutations.
+before_blocked_primary=$(command docker inspect -f '{{.Id}}' "$CONTAINER_NAME")
+if upgrade_all_proxy_instances_with_rollback >"$base/pending-recovery.log" 2>&1; then
+    echo 'FAIL: subsequent upgrade ignored unresolved recovery state' >&2; exit 1
+fi
+grep -q 'Unresolved prior group transaction' "$base/pending-recovery.log"
+test "$(command docker inspect -f '{{.Id}}' "$CONTAINER_NAME")" = "$before_blocked_primary"
+echo '  PASS: unresolved recovery blocks further group upgrades'
+
+
 
