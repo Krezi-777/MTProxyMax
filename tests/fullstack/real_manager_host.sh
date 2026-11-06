@@ -275,10 +275,16 @@ test "$(sha256sum "$CONFIG_DIR/config-19082.toml" | cut -d' ' -f1)" = "$before_f
 test "$(command docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$CONTAINER_NAME")" = always
 test "$(command docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$SECONDARY_CONTAINER")" = always
 python3 - <<'PY'
-import socket
+import socket,time
 for port in (19080, 19082):
-    with socket.create_connection(('127.0.0.1', port), timeout=3):
-        pass
+    for attempt in range(25):
+        try:
+            with socket.create_connection(('127.0.0.1', port), timeout=2):
+                break
+        except OSError:
+            time.sleep(1)
+    else:
+        raise SystemExit(f'FAIL: restored Telemt port {port} not ready after 25 probes')
 PY
 health
 echo '  PASS: failed secondary update preserves restart policies and both listening ports'
