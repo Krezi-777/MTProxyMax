@@ -117,8 +117,21 @@ run_failure_case() (
     echo "  PASS: $scenario retained prior script, config, version and avoided container changes"
 )
 
-run_failure_case build-failure
-run_failure_case fork-guard
-run_failure_case restart-failure
-run_failure_case restart-not-running
-echo 'PASS: self_update fail-closed regression tests'
+# Each scenario must emit its own proof. Do not accept a green test when
+# one or more checks silently stop running.
+cases=(build-failure fork-guard restart-failure restart-not-running)
+passed=0
+for scenario in "${cases[@]}"; do
+    case_output="$(run_failure_case "$scenario")" || {
+        printf 'FAIL: %s\n%s\n' "$scenario" "$case_output" >&2
+        exit 1
+    }
+    if ! grep -Fq "  PASS: $scenario retained prior script" <<< "$case_output"; then
+        printf 'FAIL: %s did not report its expected assertion\n%s\n' "$scenario" "$case_output" >&2
+        exit 1
+    fi
+    printf '  PASS: %s\n' "$scenario"
+    passed=$((passed + 1))
+done
+test "$passed" -eq 4 || { echo 'FAIL: expected all four failure scenarios' >&2; exit 1; }
+echo 'PASS: self_update fail-closed regression tests (4/4)'
