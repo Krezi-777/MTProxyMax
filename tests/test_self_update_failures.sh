@@ -52,12 +52,30 @@ run_failure_case() (
     }
     get_telemt_version() { printf '3.5.14-old\n'; }
     _version_gte() { return 1; }
-    build_telemt_image() { echo "build" >> "$dir/calls"; return 1; }
-    is_proxy_running() { echo "running-check" >> "$dir/calls"; return 0; }
+    build_telemt_image() {
+        echo "build" >> "$dir/calls"
+        case "$scenario" in
+            restart-failure|restart-not-running)
+                printf '3.5.16-84e5b82\n' > "$INSTALL_DIR/.telemt_version"
+                return 0 ;;
+            *) return 1 ;;
+        esac
+    }
+    is_proxy_running() {
+        echo "running-check" >> "$dir/calls"
+        if [ "$scenario" = "restart-not-running" ] && [ -e "$dir/restart-attempted" ]; then
+            return 1
+        fi
+        return 0
+    }
     load_secrets() { echo "load-secrets" >> "$dir/calls"; }
-    restart_proxy_container() { echo "restart" >> "$dir/calls"; }
+    restart_proxy_container() {
+        echo "restart" >> "$dir/calls"
+        : > "$dir/restart-attempted"
+        [ "$scenario" != "restart-failure" ]
+    }
     docker() { echo "docker $*" >> "$dir/calls"; return 0; }
-    if [ "$scenario" = "build-failure" ]; then
+    if [ "$scenario" != "fork-guard" ]; then
         # Keep the installed script unchanged, to isolate the engine failure path.
         cp "$repo/mtproxymax.sh" "$INSTALL_DIR/mtproxymax"
         cp "$INSTALL_DIR/mtproxymax" "$dir/remote-pinned"
@@ -74,7 +92,7 @@ run_failure_case() (
     fi
     # Simulate user declining a script change when testing engine failure.
     # For fork protection case, simulate user accepting an upstream replacement.
-    if [ "$scenario" = "build-failure" ]; then
+    if [ "$scenario" != "fork-guard" ]; then
         input="n"
     else
         input="y"
@@ -85,18 +103,22 @@ run_failure_case() (
     fi
     sha256sum -c "$dir/before" >/dev/null
     test "$(cat "$INSTALL_DIR/.telemt_version")" = "3.5.14-old"
-    test ! -s "$dir/calls" || {
-        if [ "$scenario" = "build-failure" ]; then
-            test "$(cat "$dir/calls")" = "build"
-        else
-            echo "FAIL: fork guard allowed an engine update" >&2
-            exit 1
-        fi
-    }
+    case "$scenario" in
+        build-failure)
+            test "$(cat "$dir/calls")" = "build" ;;
+        restart-failure)
+            test "$(cat "$dir/calls")" = "$(printf 'build\nrunning-check\nload-secrets\nrestart')" ;;
+        restart-not-running)
+            test "$(cat "$dir/calls")" = "$(printf 'build\nrunning-check\nload-secrets\nrestart\nrunning-check')" ;;
+        fork-guard)
+            test ! -s "$dir/calls" ;;
+    esac
     test "$_SCRIPT_NEEDS_REEXEC" = false
     echo "  PASS: $scenario retained prior script, config, version and avoided container changes"
 )
 
 run_failure_case build-failure
 run_failure_case fork-guard
+run_failure_case restart-failure
+run_failure_case restart-not-running
 echo 'PASS: self_update fail-closed regression tests'
