@@ -9631,7 +9631,7 @@ start_proxy_container() {
 # This path is dedicated to engine updates (not ordinary restart operations).
 # A successful update leaves the old stopped container available for manual rollback.
 upgrade_proxy_container_with_rollback() {
-    local _old_container="${CONTAINER_NAME}-rollback-$(date +%s)-$"
+    local _old_container="${CONTAINER_NAME}-rollback-$(date +%s)-${BASHPID}"
     if ! is_proxy_running; then
         log_error "Cannot perform protected upgrade: original container is not running"
         return 1
