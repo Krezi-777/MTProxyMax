@@ -59,15 +59,26 @@ command docker compose -f "$compose_file" up -d --no-build
 assert_stack_healthy() {
     local tries=30
     for ((i=1; i<=tries; i++)); do
-        if python3 - <<'PY'
-import csv, io, socket, urllib.request
+        if python3 - "$HAPROXY_CONTAINER" <<'PY'
+import csv, io, subprocess, sys
+name = sys.argv[1]
 try:
-    with socket.create_connection(("127.0.0.1", 18081), timeout=2):
-        pass
-    raw = urllib.request.urlopen("http://127.0.0.1:18404/stats;csv", timeout=2).read().decode()
-    rows = list(csv.DictReader(io.StringIO(raw.lstrip("# "))))
-    assert any(r.get("pxname") == "telemt_backend" and r.get("svname") == "telemt" and r.get("status") == "UP" for r in rows), "backend not UP"
-except Exception:
+    # With an internal Docker network, host-published ports are not a valid
+    # reachability test. Probe HAProxy from inside its own network namespace.
+    subprocess.run(["docker", "exec", name, "sh", "-c",
+                    "nc -z -w 2 127.0.0.1 18081"],
+                   check=True, capture_output=True, text=True, timeout=5)
+    result = subprocess.run(
+        ["docker", "exec", name, "wget", "-qO-", "http://127.0.0.1:8404/stats;csv"],
+        check=True, capture_output=True, text=True, timeout=5)
+    rows = list(csv.DictReader(io.StringIO(result.stdout.lstrip("# "))))
+    matches = [row for row in rows if row.get("pxname") == "telemt_backend"
+               and row.get("svname") == "telemt"]
+    assert matches, "HAProxy backend entry missing in CSV"
+    assert any(row.get("status") == "UP" for row in matches), (
+        "HAProxy backend not UP: " + repr([row.get("status") for row in matches]))
+except Exception as error:
+    print(f"health probe: {type(error).__name__}: {error}", file=sys.stderr)
     raise SystemExit(1)
 PY
         then
