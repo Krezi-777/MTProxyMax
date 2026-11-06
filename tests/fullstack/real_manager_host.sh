@@ -70,7 +70,8 @@ fn="$base/production-functions.sh"
 for item in 'get_telemt_version() {' 'get_docker_image() {' \
             'generate_telemt_config() {' 'run_proxy_container() {' \
             '_start_all_instances() {' '_instance_container_running() {' 'upgrade_proxy_container_with_rollback() {' \
-            'upgrade_all_proxy_instances_with_rollback() {'; do
+            'upgrade_all_proxy_instances_with_rollback() {' \
+            '_upgrade_all_proxy_instances_locked() {' '_upgrade_instance_tcp_ready() {'; do
     awk -v header="$item" '
         $0==header {active=1}
         active {print}
@@ -233,6 +234,20 @@ echo '  PASS: genuine manager upgrade retained old container and HAProxy remaine
 echo '  PASS: active secondary instance preserved across primary restart (no secondary upgrade performed)'
 echo 'PASS: primary production launch and multi-instance continuity on isolated GitHub runner (5/5)'
 
+# A held lock must fail closed with zero Docker mutation.
+before_lock_primary=$(command docker inspect -f '{{.Id}}' "$CONTAINER_NAME")
+before_lock_secondary=$(command docker inspect -f '{{.Id}}' "$SECONDARY_CONTAINER")
+exec 7>"${INSTALL_DIR}/.engine-group-upgrade.lock"
+flock -n 7
+if upgrade_all_proxy_instances_with_rollback; then
+    echo 'FAIL: concurrent upgrade was accepted' >&2; exit 1
+fi
+flock -u 7
+exec 7>&-
+test "$(command docker inspect -f '{{.Id}}' "$CONTAINER_NAME")" = "$before_lock_primary"
+test "$(command docker inspect -f '{{.Id}}' "$SECONDARY_CONTAINER")" = "$before_lock_secondary"
+echo '  PASS: held group lock prevents mutation'
+
 # Group upgrade: the original secondary must also be replaced and retained.
 before_group_secondary=$(command docker inspect -f '{{.Id}}' "$SECONDARY_CONTAINER")
 upgrade_all_proxy_instances_with_rollback
@@ -312,6 +327,10 @@ grep -q 'Group rollback incomplete' "$base/rollback-failure.log"
 test "$(command docker inspect -f '{{.Id}}' "$before_partial_secondary")" = "$before_partial_secondary"
 test "$(command docker inspect -f '{{.Id}}' "$CONTAINER_NAME")" = "$before_fail_primary"
 compgen -G "$CONFIG_DIR/.group-rollback.*" >/dev/null
+recovery_manifest=$(find "$CONFIG_DIR" -path '*/.group-rollback.*/RECOVERY.txt' -print -quit)
+test -n "$recovery_manifest"
+grep -q '^status=PARTIAL_ROLLBACK' "$recovery_manifest"
+grep -q '^primary_id=' "$recovery_manifest"
 echo '  PASS: rollback failure is reported; old Docker ID and snapshots retained'
 
 
