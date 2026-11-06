@@ -284,3 +284,28 @@ health
 echo '  PASS: failed secondary update preserves restart policies and both listening ports'
 echo '  PASS: failed secondary update restores both original Docker IDs and configs'
 
+# Fault inside the rollback itself: do not report success and retain the old
+# immutable container plus snapshots for manual recovery.
+before_partial_secondary=$(command docker inspect -f '{{.Id}}' "$SECONDARY_CONTAINER")
+docker() {
+    if [ "$1" = run ] && [[ " $* " == *" --name $SECONDARY_CONTAINER "* ]]; then
+        return 51
+    fi
+    if [ "$1" = rename ] && [[ "$2" == "$SECONDARY_CONTAINER-rollback-"* ]] &&
+       [ "$3" = "$SECONDARY_CONTAINER" ]; then
+        echo 'Injected secondary rollback rename failure' >&2
+        return 52
+    fi
+    command docker "$@"
+}
+if upgrade_all_proxy_instances_with_rollback >"$base/rollback-failure.log" 2>&1; then
+    echo 'FAIL: incomplete rollback reported success' >&2; exit 1
+fi
+unset -f docker
+grep -q 'Group rollback incomplete' "$base/rollback-failure.log"
+test "$(command docker inspect -f '{{.Id}}' "$before_partial_secondary")" = "$before_partial_secondary"
+test "$(command docker inspect -f '{{.Id}}' "$CONTAINER_NAME")" = "$before_fail_primary"
+compgen -G "$CONFIG_DIR/.group-rollback.*" >/dev/null
+echo '  PASS: rollback failure is reported; old Docker ID and snapshots retained'
+
+
