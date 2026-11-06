@@ -1,0 +1,75 @@
+name: Full Stack Integration (Telemt MTProxyMax HAProxy)
+
+on:
+  push:
+    branches: [fix/telemt-posix-build]
+    paths:
+      - '.github/workflows/fullstack-integration.yml'
+      - 'tests/fullstack/**'
+      - 'mtproxymax.sh'
+  pull_request:
+    paths:
+      - '.github/workflows/fullstack-integration.yml'
+      - 'tests/fullstack/**'
+      - 'mtproxymax.sh'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mtproxy-fullstack-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fullstack:
+    name: Build pinned Telemt and test HAProxy and manager rollback
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    steps:
+      - uses: actions/checkout@v6
+      - name: Prepare Dockerfile from MTProxyMax source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          source = Path("mtproxymax.sh").read_text()
+          marker = 'cat > "${build_dir}/Dockerfile" << \'DOCKERFILE_EOF\'\n'
+          assert source.count(marker) == 1, "Unable to locate pinned manager Dockerfile"
+          dockerfile = source.split(marker, 1)[1].split("\nDOCKERFILE_EOF", 1)[0] + "\n"
+          assert "TELEMT_COMMIT:0:7" not in dockerfile
+          Path("Dockerfile").write_text(dockerfile)
+          PY
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build pinned Telemt locally, do not publish
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: telemt:fullstack-test
+          build-args: |
+            TELEMT_COMMIT=84e5b82
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Validate scripts and HAProxy configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n tests/fullstack/run.sh
+          docker pull haproxy:3.1-alpine
+          docker run --rm --entrypoint haproxy \
+            -v "$PWD/tests/fullstack/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro" \
+            haproxy:3.1-alpine -c -f /usr/local/etc/haproxy/haproxy.cfg
+      - name: Execute full-stack integration on the GitHub runner
+        shell: bash
+        run: bash tests/fullstack/run.sh
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          docker ps -a --no-trunc || true
+          docker network ls || true
+          echo "Testing is confined to this GitHub runner."
