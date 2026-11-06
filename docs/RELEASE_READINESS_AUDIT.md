@@ -3,7 +3,7 @@
 **Audit date:** 2026-11-06  
 **Repository:** [Krezi-777/MTProxyMax](https://github.com/Krezi-777/MTProxyMax)  
 **Candidate branch:** `fix/telemt-posix-build`  
-**Last fully green audited code commit:** `06d88bf0d093b926cbcd48e9d0e27d27bfee542a`  
+**Last fully green audited code commit:** `05aa2d05128f179043fa33f49a3c09bb48f30ee3`  
 **Status:** **BLOCKED — NOT APPROVED FOR PUBLIC RELEASE OR PRODUCTION**
 
 This is an independent, unofficial fork, not an upstream SamNet-dev release. Production VPS / Telemt 3.5.14 was not accessed.
@@ -12,10 +12,10 @@ This is an independent, unofficial fork, not an upstream SamNet-dev release. Pro
 
 | Workflow | GitHub Actions run | Result |
 | --- | --- | --- |
-| Multi-distribution CI | [42201261539](https://github.com/Krezi-777/MTProxyMax/actions/runs/42201261539) | SUCCESS |
-| Telemt Smoke Test | [42201261589](https://github.com/Krezi-777/MTProxyMax/actions/runs/42201261589) | SUCCESS |
-| Real Docker Rollback | [42201261676](https://github.com/Krezi-777/MTProxyMax/actions/runs/42201261676) | SUCCESS |
-| Full Stack Integration | [42201261534](https://github.com/Krezi-777/MTProxyMax/actions/runs/42201261534) | SUCCESS |
+| Multi-distribution CI | [42210866342](https://github.com/Krezi-777/MTProxyMax/actions/runs/42210866342) | SUCCESS |
+| Telemt Smoke Test | [42210866405](https://github.com/Krezi-777/MTProxyMax/actions/runs/42210866405) | SUCCESS |
+| Real Docker Rollback | [42210866367](https://github.com/Krezi-777/MTProxyMax/actions/runs/42210866367) | SUCCESS |
+| Full Stack Integration | [42210866430](https://github.com/Krezi-777/MTProxyMax/actions/runs/42210866430) | SUCCESS |
 
 The full-stack integration runs the actual `run_proxy_container()`, `generate_telemt_config()`, and group-upgrade functions on an isolated GitHub runner, with privileged/host-affecting helpers stubbed. Tests cover primary and one additional running instance, successful sequential replacement, injected secondary launch failure and group rollback, TCP listener readiness, HAProxy backend status for the primary, original container identities/config restoration, restart policies, and an injected failure of rollback handling.
 
@@ -32,11 +32,11 @@ The full-stack integration runs the actual `run_proxy_container()`, `generate_te
 
 ## Remaining release blockers
 
-**B1 — Concurrent operation safety: OPEN.** Group upgrade does not acquire a shared lock preventing concurrent update/restart/instance mutation. Races over container names, configuration files and rollback snapshots remain possible. The workflow must include a tested locking and interruption/recovery policy.
+**B1 — Concurrent operation safety: PARTIALLY MITIGATED.** Group upgrade acquires an exclusive fail-closed `flock`, and an isolated test rejects a second simultaneous group upgrade. Ordinary start/stop/restart/instance mutation commands do not use this same lock. Cross-command concurrency and externally interrupted operations remain release considerations.
 
-**B2 — Reachability acceptance: OPEN.** Production group-upgrade acceptance depends on Docker status/unchanged restart count for six seconds and does not independently validate every secondary listener or all HAProxy backends inside the function. Runner integration probes both TCP ports, but the implementation lacks equivalent gated verification.
+**B2 — Reachability acceptance: PARTIALLY MITIGATED.** Group-upgrade function includes bounded TCP readiness probes for primary and secondary listeners, in addition to Docker status and restart-count stability. This still does not validate end-to-end Telegram client functionality or every production HAProxy backend.
 
-**B3 — Partial rollback / crash recovery: OPEN.** An intentionally failed rollback leaves old Docker objects/snapshots and reports an error; there is no validated automatic continuation/reconciliation after an interruption or partial rollback. Some preflight failures return without cleaning snapshots. Recovery must never remove the only viable original container.
+**B3 — Partial rollback / crash recovery: PARTIALLY MITIGATED.** The group-upgrade function records a recovery manifest, retains rollback snapshots after unverified recovery and refuses another group upgrade while unresolved snapshot directories exist. A conservative operator runbook is provided. There is still no accepted automatic reconciliation after arbitrary interruption or fully validated cleanup/recovery of every preflight failure. The operator must not delete the only viable original container.
 
 **B4 — Real Telegram/client traffic and target topology: OPEN.** No demonstrated end-to-end real Telegram clients, actual production HAProxy configuration, external routing or production server upgrade. These remain operational acceptance limits, not covered by GitHub green CI.
 
@@ -54,9 +54,10 @@ The full-stack integration runs the actual `run_proxy_container()`, `generate_te
 - [x] Original POSIX build failure corrected and CI verified.
 - [x] Pinned Telemt 3.5.16 build, smoke, real-Docker and synthetic HAProxy integration green at `06d88bf`.
 - [x] Group upgrade and selected rollback paths exercised with primary and secondary instances on disposable runner.
-- [ ] B1 concurrency lock and interruption policy implemented and tested.
-- [ ] B2 reliable per-instance reachability/HAProxy acceptance gates implemented and tested.
-- [ ] B3 partial rollback reconciliation and failure evidence validated.
+- [x] Group-upgrade lock and lock-contention refusal implemented and tested; cross-command locking remains limited.
+- [x] Bounded TCP reachability gates tested for primary and secondary; true client/production HAProxy acceptance remains open.
+- [x] Partial rollback evidence/manifest and refusal of another upgrade on unresolved state tested.
+- [ ] Arbitrary interruption recovery and operator procedure validated outside CI.
 - [ ] B4 actual Telegram traffic and real deployment topology separately accepted or explicitly excluded from release claims.
 - [ ] B5 immutable release provenance, integrity verification and installer documentation reviewed.
 - [ ] Release notes and instructions reviewed against final code.
@@ -64,3 +65,10 @@ The full-stack integration runs the actual `run_proxy_container()`, `generate_te
 - [ ] Owner separately authorizes any production deployment.
 
 **Decision:** Remain Draft. No production changes. The evidence is sufficient for continued development testing, not for public production-ready release claims.
+
+## Stage 19 documentation and provenance status
+
+- [Release candidate overview](RELEASE_CANDIDATE.md) is a **draft page in the development branch**, not a published GitHub Release.
+- [Conservative group upgrade recovery runbook](GROUP_UPGRADE_RECOVERY_RUNBOOK.md) documents read-only evidence gathering, staged reconciliation and the manual-recovery limitation.
+- The branch has no designated final release tag, independently verified SHA-256 for the exact final manager file, or approved install command. The documentation commits themselves must pass CI before any release review.
+- **Decision:** Stage 19 preparation is in progress. Keep PR Draft, no publish, no main merge, no production upgrade.
