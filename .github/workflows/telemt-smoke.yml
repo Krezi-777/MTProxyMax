@@ -1,0 +1,133 @@
+name: Telemt Smoke Test
+
+on:
+  push:
+    branches: [fix/telemt-posix-build]
+    paths:
+      - '.github/workflows/telemt-smoke.yml'
+  pull_request:
+    paths:
+      - '.github/workflows/telemt-smoke.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: Offline Telemt startup and restart (amd64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Prepare exact Dockerfile from MTProxyMax script
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          source = Path("mtproxymax.sh").read_text()
+          marker = 'cat > "${build_dir}/Dockerfile" << \'DOCKERFILE_EOF\'\n'
+          assert source.count(marker) == 1, "Expected one engine Dockerfile heredoc"
+          dockerfile = source.split(marker, 1)[1].split("\nDOCKERFILE_EOF", 1)[0] + "\n"
+          assert 'TELEMT_COMMIT:0:7' not in dockerfile, "Old non-POSIX expression remains"
+          assert 'printf' in dockerfile
+          Path("Dockerfile").write_text(dockerfile)
+          PY
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build native AMD64 image locally (no registry push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: telemt:smoke-local
+          build-args: |
+            TELEMT_COMMIT=84e5b82
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verify image architecture and executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect telemt:smoke-local --format '{{.Architecture}}')" = "amd64"
+          docker run --rm --network none --entrypoint /bin/sh telemt:smoke-local -c 'test -x /usr/local/bin/telemt'
+
+      - name: Create isolated, synthetic config
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p smoke-config
+          cat > smoke-config/config.toml <<'TOML'
+          [general]
+          use_middle_proxy = false
+          log_level = "normal"
+
+          [general.modes]
+          classic = true
+          secure = false
+          tls = false
+
+          [server]
+          port = 18080
+
+          [[server.listeners]]
+          ip = "0.0.0.0"
+
+          [censorship]
+          tls_domain = "example.org"
+          mask = false
+          tls_emulation = false
+
+          [access.users]
+          smoke_test = "0123456789abcdef0123456789abcdef"
+          TOML
+          sha256sum smoke-config/config.toml | cut -d' ' -f1 > config.sha256
+
+      - name: Start, inspect, stop and restart offline container
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run -d --name telemt-smoke --network none --read-only \
+            --cap-drop ALL --security-opt no-new-privileges \
+            --tmpfs /run/telemt:rw,size=4m,mode=1777 \
+            -w /run/telemt \
+            -v "$PWD/smoke-config:/etc/telemt:ro" \
+            telemt:smoke-local /etc/telemt/config.toml
+
+          for attempt in {1..15}; do
+            if ! test "$(docker inspect -f '{{.State.Running}}' telemt-smoke)" = "true"; then
+              echo "Container exited during startup" >&2
+              docker logs telemt-smoke >&2
+              exit 1
+            fi
+            sleep 1
+          done
+          docker exec telemt-smoke /bin/sh -c 'test -r /etc/telemt/config.toml'
+          docker stop -t 15 telemt-smoke
+          test "$(docker inspect -f '{{.State.Running}}' telemt-smoke)" = "false"
+          docker start telemt-smoke
+          sleep 5
+          test "$(docker inspect -f '{{.State.Running}}' telemt-smoke)" = "true"
+          test "$(sha256sum smoke-config/config.toml | cut -d' ' -f1)" = "$(cat config.sha256)"
+          docker stop -t 15 telemt-smoke
+
+      - name: Diagnostics if smoke test fails
+        if: failure()
+        shell: bash
+        run: |
+          docker ps -a --filter name=telemt-smoke || true
+          docker logs --tail 100 telemt-smoke 2>&1 || true
+
+      - name: Remove temporary container and config
+        if: always()
+        shell: bash
+        run: |
+          docker rm -f telemt-smoke 2>/dev/null || true
+          rm -rf smoke-config config.sha256

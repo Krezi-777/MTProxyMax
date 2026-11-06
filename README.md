@@ -1,3 +1,6 @@
+> [!CAUTION]
+> **Unofficial development fork — not approved for production use.** This branch contains a tested POSIX Telemt build fix and experimental rollback work, but a public release has **not** been published. The upstream Quick Start command shown below installs **SamNet-dev's original project**, not this fork. Do not use it to install this fix. The fork's `install.sh` requires an explicitly reviewed 40-character commit SHA and matching SHA-256; no automatic moving-branch installation is supported. See the [unpublished candidate page](docs/RELEASE_CANDIDATE.md), [recovery runbook](docs/GROUP_UPGRADE_RECOVERY_RUNBOOK.md), [release-readiness audit](docs/RELEASE_READINESS_AUDIT.md) and [draft release notes](docs/DRAFT_RELEASE_NOTES.md).
+
 <p align="center">
   <h1 align="center">MTProxyMax</h1>
   <p align="center"><b>The Ultimate Telegram MTProto Proxy Manager</b></p>

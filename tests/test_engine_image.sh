@@ -53,7 +53,10 @@ build_telemt_image
 assert_no_latest_pull
 grep -q "^build --build-arg TELEMT_COMMIT=${TELEMT_COMMIT} " "$tmp/calls"
 assert_marker "$version"
-grep -Fq 'RUN git checkout --detach "${TELEMT_COMMIT}" && test "$(git rev-parse HEAD | cut -c1-7)" = "${TELEMT_COMMIT:0:7}"' "$tmp/Dockerfile"
+grep -Fq '$(printf' "$tmp/Dockerfile"
+! grep -Fq 'TELEMT_COMMIT:0:7' "$tmp/Dockerfile"
+sh -c 'TELEMT_COMMIT=84e5b82; test "$(printf "%.7s" "$TELEMT_COMMIT")" = 84e5b82'
+sh -c 'TELEMT_COMMIT=84e5b82deadbeef; test "$(printf "%.7s" "$TELEMT_COMMIT")" = 84e5b82'
 grep -Fq 'cargo build --release --locked' "$tmp/Dockerfile"
 
 reset_case

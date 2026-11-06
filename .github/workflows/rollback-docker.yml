@@ -1,0 +1,38 @@
+name: Real Docker Rollback Integration
+
+on:
+  push:
+    branches: [fix/telemt-posix-build]
+    paths:
+      - 'tests/integration/rollback_docker.sh'
+      - '.github/workflows/rollback-docker.yml'
+      - 'mtproxymax.sh'
+  pull_request:
+    paths:
+      - 'tests/integration/rollback_docker.sh'
+      - '.github/workflows/rollback-docker.yml'
+      - 'mtproxymax.sh'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rollback-docker-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  docker-rollback:
+    name: Real Docker rollback transaction (isolated)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - name: Verify script syntax
+        run: bash -n tests/integration/rollback_docker.sh
+      - name: Start Docker on runner
+        run: |
+          sudo systemctl start docker
+          docker info
+      - name: Real Docker rollback integration
+        run: bash tests/integration/rollback_docker.sh

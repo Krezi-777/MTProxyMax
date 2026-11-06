@@ -1189,7 +1189,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends git && \
     rm -rf /var/lib/apt/lists/*
 RUN git clone "https://github.com/telemt/telemt.git" /build
 WORKDIR /build
-RUN git checkout --detach "${TELEMT_COMMIT}" && test "$(git rev-parse HEAD | cut -c1-7)" = "${TELEMT_COMMIT:0:7}"
+RUN git checkout --detach "${TELEMT_COMMIT}" && test "$(git rev-parse HEAD | cut -c1-7)" = "$(printf '%.7s' "$TELEMT_COMMIT")"
 ENV CARGO_PROFILE_RELEASE_LTO=true CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 CARGO_PROFILE_RELEASE_DEBUG=false
 RUN cargo build --release --locked && \
     (strip target/release/telemt 2>/dev/null || true) && \
@@ -1380,6 +1380,7 @@ stats_listen = "127.0.0.1:${stats_port}"
 metrics_whitelist = ["127.0.0.1", "::1"]
 ${CLIENT_MSS:+client_mss = \"${CLIENT_MSS}\"}
 
+$([ "${TELEMT_SECONDARY_INSTANCE:-false}" = "true" ] && { echo "[server.api]"; echo "enabled = false"; })
 [timeouts]
 client_handshake = 30
 client_keepalive = 15
@@ -9585,7 +9586,7 @@ _start_all_instances() {
         local inst_config="${CONFIG_DIR}/config-${INSTANCE_PORTS[$i]}.toml"
         PROXY_PORT="${INSTANCE_PORTS[$i]}"
         PROXY_METRICS_PORT="${INSTANCE_METRICS_PORTS[$i]}"
-        generate_telemt_config "$inst_config"
+        TELEMT_SECONDARY_INSTANCE=true generate_telemt_config "$inst_config"
         docker rm -f "$cname" &>/dev/null || true
         local _inst_out
         _inst_out=$(docker run -d --name "$cname" --restart unless-stopped --network host \
@@ -9625,6 +9626,267 @@ start_proxy_container() {
     _start_all_instances 2>/dev/null
     apply_firewall_rules 2>/dev/null || true
     speed_limit_apply 2>/dev/null || true
+}
+
+# Upgrade the primary container while retaining the original Docker container.
+# This path is dedicated to engine updates (not ordinary restart operations).
+# A successful update leaves the old stopped container available for manual rollback.
+upgrade_proxy_container_with_rollback() {
+    local _old_container="${CONTAINER_NAME}-rollback-$(date +%s)-${BASHPID}"
+    local _cfg_file="${CONFIG_DIR}/config.toml"
+    local _cfg_snapshot="" _cfg_existed=false _cfg_restore_ok=true
+    if ! is_proxy_running; then
+        log_error "Cannot perform protected upgrade: original container is not running"
+        return 1
+    fi
+    if docker inspect "$_old_container" >/dev/null 2>&1; then
+        log_error "Rollback container name already exists"
+        return 1
+    fi
+    # run_proxy_container regenerates config.toml. A container rollback without
+    # restoring that file would leave the previous image with the new settings.
+    if [ -f "$_cfg_file" ]; then
+        _cfg_existed=true
+        _cfg_snapshot=$(mktemp "${CONFIG_DIR}/.config-rollback.XXXXXX") || {
+            log_error "Cannot allocate config rollback snapshot"
+            return 1
+        }
+        if ! cp -p "$_cfg_file" "$_cfg_snapshot"; then
+            rm -f "$_cfg_snapshot"
+            log_error "Cannot snapshot config before upgrade"
+            return 1
+        fi
+    fi
+    flush_traffic_to_disk 2>/dev/null || true
+    if ! docker update --restart=no "$CONTAINER_NAME" >/dev/null 2>&1; then
+        [ -z "$_cfg_snapshot" ] || rm -f "$_cfg_snapshot"
+        log_error "Unable to disable old container restart policy; aborting upgrade"
+        return 1
+    fi
+    if ! docker stop --timeout 10 "$CONTAINER_NAME" >/dev/null 2>&1; then
+        [ -z "$_cfg_snapshot" ] || rm -f "$_cfg_snapshot"
+        docker update --restart=unless-stopped "$CONTAINER_NAME" >/dev/null 2>&1 || true
+        log_error "Unable to stop old container; aborting upgrade"
+        return 1
+    fi
+    if ! docker rename "$CONTAINER_NAME" "$_old_container"; then
+        [ -z "$_cfg_snapshot" ] || rm -f "$_cfg_snapshot"
+        docker update --restart=unless-stopped "$CONTAINER_NAME" >/dev/null 2>&1 || true
+        docker start "$CONTAINER_NAME" >/dev/null 2>&1 || true
+        log_error "Unable to retain rollback container; aborting upgrade"
+        return 1
+    fi
+
+    # run_proxy_container builds/creates the replacement using the selected image.
+    if run_proxy_container && is_proxy_running; then
+        # Reject short-lived "running" states and Docker restart loops.
+        local _stable=true _initial_id _initial_restarts _check_id _check_restarts
+        _initial_id=$(docker inspect -f '{{.Id}}' "$CONTAINER_NAME" 2>/dev/null) || _stable=false
+        _initial_restarts=$(docker inspect -f '{{.RestartCount}}' "$CONTAINER_NAME" 2>/dev/null) || _stable=false
+        local _probe
+        for _probe in 1 2 3 4 5 6; do
+            sleep 1
+            is_proxy_running || { _stable=false; break; }
+            _check_id=$(docker inspect -f '{{.Id}}' "$CONTAINER_NAME" 2>/dev/null) || { _stable=false; break; }
+            _check_restarts=$(docker inspect -f '{{.RestartCount}}' "$CONTAINER_NAME" 2>/dev/null) || { _stable=false; break; }
+            if [ "$_check_id" != "$_initial_id" ] || [ "$_check_restarts" != "$_initial_restarts" ]; then
+                _stable=false
+                break
+            fi
+        done
+        if [ "$_stable" = true ] && is_proxy_running; then
+            [ -z "$_cfg_snapshot" ] || rm -f "$_cfg_snapshot"
+            _start_all_instances 2>/dev/null || true
+            apply_firewall_rules 2>/dev/null || true
+            speed_limit_apply 2>/dev/null || true
+            log_info "Old container retained as: $_old_container"
+            return 0
+        fi
+    fi
+
+    log_warn "New container did not start reliably; restoring previous container"
+    # Restore config before starting the old container; replace atomically
+    # on the same filesystem to avoid a partial TOML read.
+    if [ "$_cfg_existed" = true ]; then
+        if ! mv -f "$_cfg_snapshot" "$_cfg_file"; then
+            _cfg_restore_ok=false
+            log_error "Unable to restore previous Telemt config from $_cfg_snapshot"
+        fi
+    else
+        if ! rm -f "$_cfg_file"; then
+            _cfg_restore_ok=false
+            log_error "Unable to remove generated config during rollback"
+        fi
+    fi
+    docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+    if ! docker rename "$_old_container" "$CONTAINER_NAME"; then
+        log_error "Automatic rollback failed: old container remains named $_old_container"
+        return 1
+    fi
+    docker update --restart=unless-stopped "$CONTAINER_NAME" >/dev/null 2>&1 || true
+    if ! docker start "$CONTAINER_NAME" >/dev/null 2>&1 || ! is_proxy_running; then
+        log_error "Automatic rollback failed to start previous container"
+        return 1
+    fi
+    if [ "$_cfg_restore_ok" != true ]; then
+        log_error "Previous container started but original config was not restored"
+        return 1
+    fi
+    log_warn "Previous container and config restored successfully; engine update aborted"
+    return 1
+}
+
+# Coordinated upgrade: running secondary instances only, with group rollback.
+# Fail closed if flock is unavailable. The lock spans the entire upgrade.
+upgrade_all_proxy_instances_with_rollback() {
+    local _upgrade_lock_fd _upgrade_rc=0
+    if ! command -v flock >/dev/null 2>&1; then
+        log_error "Protected group upgrade requires flock"
+        return 1
+    fi
+    exec {_upgrade_lock_fd}>"${INSTALL_DIR}/.engine-group-upgrade.lock" || return 1
+    if ! flock -n "$_upgrade_lock_fd"; then
+        log_error "Another protected group upgrade is running"
+        exec {_upgrade_lock_fd}>&-
+        return 1
+    fi
+    # A previous interrupted/partial transaction requires reconciliation first.
+    local _pending_snapshot
+    for _pending_snapshot in "${CONFIG_DIR}"/.group-rollback.*; do
+        if [ -d "$_pending_snapshot" ]; then
+            log_error "Unresolved prior group transaction: $_pending_snapshot; manual recovery required"
+            flock -u "$_upgrade_lock_fd" 2>/dev/null || true
+            exec {_upgrade_lock_fd}>&-
+            return 1
+        fi
+    done
+    _upgrade_all_proxy_instances_locked || _upgrade_rc=$?
+    flock -u "$_upgrade_lock_fd" 2>/dev/null || true
+    exec {_upgrade_lock_fd}>&-
+    return "$_upgrade_rc"
+}
+
+# Port readiness supplements Docker running/restart-count checks.
+_upgrade_instance_tcp_ready() {
+    local _port="$1"
+    [[ "$_port" =~ ^[0-9]+$ ]] || return 1
+    command -v timeout >/dev/null 2>&1 || return 1
+    timeout 2 bash -c 'exec 3<>/dev/tcp/127.0.0.1/"$1"' _ "$_port" >/dev/null 2>&1
+}
+
+_upgrade_all_proxy_instances_locked() {
+    local original image snapshot i name port old cfg id restarts n failed=0 original_policy
+    local original_port="$PROXY_PORT" original_metrics="$PROXY_METRICS_PORT"
+    local -a names=() ports=() metrics=() ids=() backups=() policies=()
+    is_proxy_running || return 1
+    original=$(docker inspect -f '{{.Id}}' "$CONTAINER_NAME") || return 1
+    original_policy=$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$CONTAINER_NAME") || return 1
+    image=$(get_docker_image) || return 1
+    docker image inspect "$image" >/dev/null 2>&1 || return 1
+    snapshot=$(mktemp -d "$CONFIG_DIR/.group-rollback.XXXXXX") || return 1
+    cp -p "$CONFIG_DIR/config.toml" "$snapshot/primary.toml" || return 1
+    load_instances || return 1
+    for i in "${!INSTANCE_PORTS[@]}"; do
+        [ "${INSTANCE_ENABLED[$i]}" = true ] || continue
+        port="${INSTANCE_PORTS[$i]}"
+        name="mtproxymax-$port"
+        _instance_container_running "$name" || continue
+        cp -p "$CONFIG_DIR/config-$port.toml" "$snapshot/$port.toml" || return 1
+        names+=("$name"); ports+=("$port"); metrics+=("${INSTANCE_METRICS_PORTS[$i]}")
+        ids+=("$(docker inspect -f '{{.Id}}' "$name")")
+        policies+=("$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$name")")
+    done
+    # Durable preflight manifest survives interruption until successful completion.
+    {
+        printf 'status=IN_PROGRESS\nprimary_id=%s\nprimary_name=%s\n' "$original" "$CONTAINER_NAME"
+        for i in "${!names[@]}"; do
+            printf 'secondary_name=%s original_id=%s\n' "${names[$i]}" "${ids[$i]}"
+        done
+    } > "$snapshot/RECOVERY.txt" || return 1
+    chmod 600 "$snapshot/RECOVERY.txt" || return 1
+    if ! upgrade_proxy_container_with_rollback; then
+        # Primary's recovery outcome may require manual intervention; keep the
+        # manifest if the original identity did not come back.
+        if [ "$(docker inspect -f '{{.Id}}' "$CONTAINER_NAME" 2>/dev/null)" = "$original" ]; then
+            rm -rf "$snapshot"
+        else
+            printf 'status=PRIMARY_RECOVERY_UNVERIFIED\n' >> "$snapshot/RECOVERY.txt"
+            log_error "Primary recovery unverified; retained snapshots at $snapshot"
+        fi
+        return 1
+    fi
+    for i in "${!names[@]}"; do
+        name="${names[$i]}"; port="${ports[$i]}"
+        old="$name-rollback-$(date +%s)-$BASHPID"
+        if ! docker update --restart=no "$name" >/dev/null 2>&1 ||
+           ! docker stop --timeout 10 "$name" >/dev/null 2>&1 ||
+           ! docker rename "$name" "$old" >/dev/null 2>&1; then failed=1; break; fi
+        backups[$i]="$old"
+        PROXY_PORT="$port"; PROXY_METRICS_PORT="${metrics[$i]}"
+        cfg="$CONFIG_DIR/config-$port.toml"
+        if ! TELEMT_SECONDARY_INSTANCE=true generate_telemt_config "$cfg"; then failed=1; break; fi
+        PROXY_PORT="$original_port"; PROXY_METRICS_PORT="$original_metrics"
+        if ! docker run -d --name "$name" --restart unless-stopped --network host \
+          --ulimit nofile=65535:65535 --log-opt max-size=10m --log-opt max-file=3 \
+          -v "$CONFIG_DIR:/etc/telemt:ro" "$image" "/etc/telemt/config-$port.toml" >/dev/null; then failed=1; break; fi
+        id=$(docker inspect -f '{{.Id}}' "$name") || { failed=1; break; }
+        restarts=$(docker inspect -f '{{.RestartCount}}' "$name") || { failed=1; break; }
+        for n in 1 2 3 4 5 6; do
+            sleep 1
+            if ! _instance_container_running "$name" ||
+               [ "$(docker inspect -f '{{.Id}}' "$name" 2>/dev/null)" != "$id" ] ||
+               [ "$(docker inspect -f '{{.RestartCount}}' "$name" 2>/dev/null)" != "$restarts" ]; then failed=1; break; fi
+        done
+        [ "$failed" = 0 ] || break
+        local _ready=false _attempt
+        for _attempt in 1 2 3 4 5 6; do
+            if _upgrade_instance_tcp_ready "$port"; then _ready=true; break; fi
+            sleep 1
+        done
+        if [ "$_ready" != true ]; then
+            log_error "Secondary instance $name failed TCP readiness on port $port"
+            failed=1
+            break
+        fi
+    done
+    PROXY_PORT="$original_port"; PROXY_METRICS_PORT="$original_metrics"
+    if [ "$failed" = 0 ] && ! _upgrade_instance_tcp_ready "$original_port"; then
+        log_error "Primary port $original_port not reachable after group upgrade"
+        failed=1
+    fi
+    if [ "$failed" = 0 ]; then rm -rf "$snapshot"; return 0; fi
+    for ((i=${#names[@]}-1;i>=0;i--)); do
+        name="${names[$i]}"; port="${ports[$i]}"
+        if [ -n "${backups[$i]:-}" ]; then
+            docker rm -f "$name" >/dev/null 2>&1 || true
+            cp -p "$snapshot/$port.toml" "$CONFIG_DIR/config-$port.toml" || failed=2
+            docker rename "${backups[$i]}" "$name" >/dev/null 2>&1 || failed=2
+        fi
+        if [ "$(docker inspect -f '{{.Id}}' "$name" 2>/dev/null)" = "${ids[$i]}" ]; then
+            docker update --restart="${policies[$i]:-unless-stopped}" "$name" >/dev/null 2>&1 || failed=2
+            docker start "$name" >/dev/null 2>&1 || failed=2
+        else failed=2; fi
+    done
+    old=$(docker inspect -f '{{.Name}}' "$original" 2>/dev/null)
+    old="${old#/}"
+    cp -p "$snapshot/primary.toml" "$CONFIG_DIR/config.toml" || failed=2
+    if [ -n "$old" ] && [ "$old" != "$CONTAINER_NAME" ]; then
+        docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+        docker rename "$old" "$CONTAINER_NAME" >/dev/null 2>&1 || failed=2
+        docker update --restart="${original_policy:-unless-stopped}" "$CONTAINER_NAME" >/dev/null 2>&1 || failed=2
+        docker start "$CONTAINER_NAME" >/dev/null 2>&1 || failed=2
+    else failed=2; fi
+    if [ "$failed" = 2 ]; then
+        {
+            printf 'status=PARTIAL_ROLLBACK\nprimary_id=%s\nprimary_name=%s\n' "$original" "$CONTAINER_NAME"
+            for i in "${!names[@]}"; do
+                printf 'secondary_name=%s original_id=%s rollback_name=%s\n' "${names[$i]}" "${ids[$i]}" "${backups[$i]:-not-renamed}"
+            done
+        } > "$snapshot/RECOVERY.txt"
+        chmod 600 "$snapshot/RECOVERY.txt" 2>/dev/null || true
+        log_error "Group rollback incomplete; retained snapshots at $snapshot"
+    else rm -rf "$snapshot"; fi
+    return 1
 }
 
 restart_proxy_container() {
@@ -9692,7 +9954,7 @@ reload_proxy_config() {
             local inst_config="${CONFIG_DIR}/config-${INSTANCE_PORTS[$i]}.toml"
             PROXY_PORT="${INSTANCE_PORTS[$i]}"
             PROXY_METRICS_PORT="${INSTANCE_METRICS_PORTS[$i]}"
-            generate_telemt_config "$inst_config"
+            TELEMT_SECONDARY_INSTANCE=true generate_telemt_config "$inst_config"
             _instance_container_running "mtproxymax-${INSTANCE_PORTS[$i]}" || continue
             docker kill -s SIGHUP "mtproxymax-${INSTANCE_PORTS[$i]}" 2>/dev/null \
                 || log_warn "Instance ${INSTANCE_PORTS[$i]}: could not signal the engine to reload"
@@ -10314,7 +10576,21 @@ self_update() {
     fi
 
     local _script_updated=false
-    local _url="https://raw.githubusercontent.com/${GITHUB_REPO}/main/mtproxymax.sh"
+    # Fork updates require an explicit immutable commit and expected SHA256.
+    # Without an opt-in, retain upstream update checking but block replacement.
+    local _update_repo="${GITHUB_REPO}" _update_ref="main" _expected_script_sha=""
+    if [ -n "${MTPROXYMAX_FORK_UPDATE_COMMIT:-}" ]; then
+        _update_repo="Krezi-777/MTProxyMax"
+        _update_ref="${MTPROXYMAX_FORK_UPDATE_COMMIT}"
+        _expected_script_sha="${MTPROXYMAX_FORK_UPDATE_SHA256:-}"
+        if [[ ! "$_update_ref" =~ ^[0-9a-fA-F]{40}$ ]] ||
+           [[ ! "$_expected_script_sha" =~ ^[0-9a-fA-F]{64}$ ]]; then
+            log_error "Fork script update requires pinned 40-hex commit and 64-hex SHA256"
+            return 1
+        fi
+        _expected_script_sha="${_expected_script_sha,,}"
+    fi
+    local _url="https://raw.githubusercontent.com/${_update_repo}/${_update_ref}/mtproxymax.sh"
 
     echo ""
     log_info "Checking for script updates..."
@@ -10324,6 +10600,15 @@ self_update() {
 
     if curl -fsSL --max-time 60 --max-filesize 5242880 -o "$_tmp" "$_url" 2>/dev/null; then
         # Validate: bash syntax + sanity check
+        if [ -n "$_expected_script_sha" ]; then
+            local _actual_script_sha
+            _actual_script_sha=$(sha256sum "$_tmp" | cut -d' ' -f1)
+            if [ "$_actual_script_sha" != "$_expected_script_sha" ]; then
+                log_error "Fork update SHA256 mismatch; downloaded script was not executed"
+                rm -f "$_tmp"
+                return 1
+            fi
+        fi
         if ! bash -n "$_tmp" 2>/dev/null; then
             log_error "Downloaded script has syntax errors — aborting"
             rm -f "$_tmp"; return 1
@@ -10352,9 +10637,13 @@ self_update() {
             rm -f "$_tmp" "$_UPDATE_BADGE"
             # Update stored SHA so background check doesn't re-trigger the badge
             local _new_sha
-            _new_sha=$(curl -fsSL --connect-timeout 5 --max-time 10 \
-                "https://api.github.com/repos/${GITHUB_REPO}/commits/main" \
-                -H "Accept: application/vnd.github.sha" 2>/dev/null) || true
+            if [ -n "$_expected_script_sha" ]; then
+                _new_sha="$_update_ref"
+            else
+                _new_sha=$(curl -fsSL --connect-timeout 5 --max-time 10 \
+                    "https://api.github.com/repos/${GITHUB_REPO}/commits/main" \
+                    -H "Accept: application/vnd.github.sha" 2>/dev/null) || true
+            fi
             [ -n "$_new_sha" ] && [ ${#_new_sha} -ge 40 ] && echo "${_new_sha:0:40}" > "$_UPDATE_SHA_FILE" 2>/dev/null || true
             # Detect stale in-memory version (file on disk is newer than running process)
             if [ -n "$_new_ver" ] && [ "$_new_ver" != "$VERSION" ]; then
@@ -10369,11 +10658,24 @@ self_update() {
                 log_info "Skipped"
                 rm -f "$_tmp"
             else
-                mkdir -p "$BACKUP_DIR"
-                cp "${INSTALL_DIR}/mtproxymax" \
-                   "${BACKUP_DIR}/mtproxymax.v${VERSION}.$(date +%s)" 2>/dev/null || true
+                # Fork safety: never overwrite modified script with upstream by default.
+                if [ -z "$_expected_script_sha" ] && [ "${MTPROXYMAX_ALLOW_UPSTREAM_OVERWRITE:-0}" != "1" ]; then
+                    log_error "Upstream script replacement disabled in this fork. Set MTPROXYMAX_ALLOW_UPSTREAM_OVERWRITE=1 only to opt in explicitly."
+                    rm -f "$_tmp"
+                    return 1
+                fi
+                if ! mkdir -p "$BACKUP_DIR" || ! cp -p "${INSTALL_DIR}/mtproxymax" \
+                   "${BACKUP_DIR}/mtproxymax.v${VERSION}.$(date +%s)"; then
+                    log_error "Cannot back up installed manager; refusing to replace script"
+                    rm -f "$_tmp"
+                    return 1
+                fi
                 chmod +x "$_tmp"
-                mv "$_tmp" "${INSTALL_DIR}/mtproxymax"
+                if ! mv "$_tmp" "${INSTALL_DIR}/mtproxymax"; then
+                    log_error "Unable to install verified manager script"
+                    rm -f "$_tmp"
+                    return 1
+                fi
                 log_success "Script updated to v${_new_ver:-?}"
                 _script_updated=true
                 _SCRIPT_NEEDS_REEXEC=true
@@ -10381,9 +10683,13 @@ self_update() {
 
                 # Save new commit SHA as baseline
                 local _new_sha
-                _new_sha=$(curl -fsSL --connect-timeout 5 --max-time 10 \
-                    "https://api.github.com/repos/${GITHUB_REPO}/commits/main" \
-                    -H "Accept: application/vnd.github.sha" 2>/dev/null) || true
+                if [ -n "$_expected_script_sha" ]; then
+                    _new_sha="$_update_ref"
+                else
+                    _new_sha=$(curl -fsSL --connect-timeout 5 --max-time 10 \
+                        "https://api.github.com/repos/${GITHUB_REPO}/commits/main" \
+                        -H "Accept: application/vnd.github.sha" 2>/dev/null) || true
+                fi
                 if [ -n "$_new_sha" ] && [ ${#_new_sha} -ge 40 ]; then
                     _new_sha="${_new_sha:0:40}"
                     case "$_new_sha" in
@@ -10429,25 +10735,38 @@ self_update() {
         log_success "Telemt engine is up to date (v${_current_ver})"
     else
         log_info "Engine update: v${_current_ver} -> v${_expected_ver}"
-        build_telemt_image true
+        # Preserve the previous version marker until the replacement is healthy.
+        local _previous_marker_present=false _previous_marker=""
+        if [ -f "${INSTALL_DIR}/.telemt_version" ]; then
+            _previous_marker_present=true
+            _previous_marker=$(cat "${INSTALL_DIR}/.telemt_version")
+        fi
+        if ! build_telemt_image true; then
+            log_error "Telemt image update failed; preserving the existing running container and old images"
+            return 1
+        fi
         if is_proxy_running; then
             load_secrets
-            restart_proxy_container
+            # Do not delete rollback images when restart fails or the new
+            # container is not running. The old container may have already been
+            # removed by restart_proxy_container; recovery still needs validation.
+            if ! upgrade_all_proxy_instances_with_rollback || ! is_proxy_running; then
+                # The build function updates the marker before restart succeeds.
+                # Restore the old marker so the next attempt doesn't report a
+                # broken replacement as the installed version.
+                if [ "$_previous_marker_present" = true ]; then
+                    printf '%s\n' "$_previous_marker" > "${INSTALL_DIR}/.telemt_version"
+                else
+                    rm -f "${INSTALL_DIR}/.telemt_version"
+                fi
+                log_error "Telemt restart failed; retaining older Docker images for manual recovery"
+                return 1
+            fi
         fi
-        # Clean up old engine images (keep only the current version + latest)
-        local _old_img
-        while IFS= read -r _old_img; do
-            [ -z "$_old_img" ] && continue
-            [[ "$_old_img" == *":${_expected_ver}" ]] && continue
-            [[ "$_old_img" == *":latest" ]] && continue
-            docker rmi "$_old_img" 2>/dev/null && log_info "Removed old image: ${_old_img}"
-        done <<< "$(docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep "^${DOCKER_IMAGE_BASE}:")"
-        # Also clean registry-prefixed copies
-        while IFS= read -r _old_img; do
-            [ -z "$_old_img" ] && continue
-            [[ "$_old_img" == *":${_expected_ver}" ]] && continue
-            docker rmi "$_old_img" 2>/dev/null || true
-        done <<< "$(docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep "^${REGISTRY_IMAGE}:")"
+        # Do not remove old engine images automatically. A successful process
+        # restart is not enough to prove sustained availability or HAProxy
+        # connectivity, and the previous image is required for rollback.
+        log_info "Keeping previous telemt images for rollback; cleanup must be explicit"
     fi
 }
 
@@ -17094,7 +17413,7 @@ instance_add() {
     local _orig_port="$PROXY_PORT" _orig_mport="$PROXY_METRICS_PORT"
     PROXY_PORT="$port"
     PROXY_METRICS_PORT="$mport"
-    generate_telemt_config "$inst_config"
+    TELEMT_SECONDARY_INSTANCE=true generate_telemt_config "$inst_config"
     PROXY_PORT="$_orig_port"
     PROXY_METRICS_PORT="$_orig_mport"
 
