@@ -10435,6 +10435,12 @@ self_update() {
         log_success "Telemt engine is up to date (v${_current_ver})"
     else
         log_info "Engine update: v${_current_ver} -> v${_expected_ver}"
+        # Preserve the previous version marker until the replacement is healthy.
+        local _previous_marker_present=false _previous_marker=""
+        if [ -f "${INSTALL_DIR}/.telemt_version" ]; then
+            _previous_marker_present=true
+            _previous_marker=$(cat "${INSTALL_DIR}/.telemt_version")
+        fi
         if ! build_telemt_image true; then
             log_error "Telemt image update failed; preserving the existing running container and old images"
             return 1
@@ -10445,6 +10451,14 @@ self_update() {
             # container is not running. The old container may have already been
             # removed by restart_proxy_container; recovery still needs validation.
             if ! restart_proxy_container || ! is_proxy_running; then
+                # The build function updates the marker before restart succeeds.
+                # Restore the old marker so the next attempt doesn't report a
+                # broken replacement as the installed version.
+                if [ "$_previous_marker_present" = true ]; then
+                    printf '%s\n' "$_previous_marker" > "${INSTALL_DIR}/.telemt_version"
+                else
+                    rm -f "${INSTALL_DIR}/.telemt_version"
+                fi
                 log_error "Telemt restart failed; retaining older Docker images for manual recovery"
                 return 1
             fi
