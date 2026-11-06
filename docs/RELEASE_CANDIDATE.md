@@ -20,10 +20,11 @@ The development branch also adds guarded engine replacement, selected rollback/r
 | Release tag | **NOT CREATED** |
 | Published Docker image | **NONE** |
 | Independently verified `mtproxymax.sh` SHA-256 | `aa527da3314d29ec9ed5e59ca09a1e0c96d1fd5db397c5f705c4831cce1abf7e` — checked against an immutable raw GitHub download in [provenance run 42219216246](https://github.com/Krezi-777/MTProxyMax/actions/runs/42219216246) |
+| Independently verified `install.sh` SHA-256 | `c04916744e494fadd13d8c4797feb68d9014f1b7e11737c49d089789b4198cba` — checkout plus immutable raw HTTPS verified in [run 42219426404](https://github.com/Krezi-777/MTProxyMax/actions/runs/42219426404) |
 | Release package checksum | **NOT YET RECORDED** |
 | Published install command | **NONE** |
 
-The manager script digest was first computed from the GitHub API and then independently checked on an isolated GitHub Runner using `sha256sum` on the checkout and an immutable raw HTTPS download, with byte-for-byte comparison. This is integrity evidence, **not a digital signature**, clean-install acceptance or publication authorization. The release commit cannot be finalized until the documentation and remaining changes stop moving. A Git commit SHA identifies a source-tree revision; it is **not** the SHA-256 digest of the raw manager script or a Docker image.
+The manager and installer digests were independently checked on isolated GitHub Runners using `sha256sum` on the checkout and an immutable raw HTTPS download, with byte-for-byte comparison. This is integrity evidence, **not a digital signature**, clean-install acceptance or publication authorization. The release commit cannot be finalized until the documentation and remaining changes stop moving. A Git commit SHA identifies a source-tree revision; it is **not** the SHA-256 digest of the raw manager script or a Docker image.
 
 ## Test evidence (development, not operational deployment)
 
@@ -50,7 +51,8 @@ A **future**, separately approved installation guide must supply a reviewed immu
 - [ ] Final reviewed source commit and immutable tag designated.
 - [ ] Full CI green on that exact final commit (including docs and packaging).
 - [x] Independently verify the manager SHA-256 against immutable raw HTTPS content on a GitHub Runner.
-- [ ] Independently record and review installer SHA-256 and any future release package checksums.
+- [x] Independently verify the installer SHA-256 against immutable raw HTTPS content on a GitHub Runner.
+- [ ] Independently record checksums of any future release packages/assets.
 - [ ] Confirm no unexpected secrets/configuration in public source and no existing-name/tag collisions.
 - [ ] Repeat clean installation in isolated environment using immutable ref and matching SHA-256.
 - [ ] Decide how to handle unresolved partial rollback and real Telegram/client validation; document accepted limitations explicitly.
