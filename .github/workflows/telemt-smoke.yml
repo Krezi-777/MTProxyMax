@@ -1,6 +1,13 @@
 name: Telemt Smoke Test
 
 on:
+  push:
+    branches: [fix/telemt-posix-build]
+    paths:
+      - '.github/workflows/telemt-smoke.yml'
+  pull_request:
+    paths:
+      - '.github/workflows/telemt-smoke.yml'
   workflow_dispatch:
 
 permissions:
