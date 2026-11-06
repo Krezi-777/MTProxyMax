@@ -10436,13 +10436,9 @@ self_update() {
             if [ -n "$_expected_script_sha" ]; then
                 _new_sha="$_update_ref"
             else
-                if [ -n "$_expected_script_sha" ]; then
-                    _new_sha="$_update_ref"
-                else
-                    _new_sha=$(curl -fsSL --connect-timeout 5 --max-time 10 \
-                        "https://api.github.com/repos/${GITHUB_REPO}/commits/main" \
-                        -H "Accept: application/vnd.github.sha" 2>/dev/null) || true
-                fi
+                _new_sha=$(curl -fsSL --connect-timeout 5 --max-time 10 \
+                    "https://api.github.com/repos/${GITHUB_REPO}/commits/main" \
+                    -H "Accept: application/vnd.github.sha" 2>/dev/null) || true
             fi
             [ -n "$_new_sha" ] && [ ${#_new_sha} -ge 40 ] && echo "${_new_sha:0:40}" > "$_UPDATE_SHA_FILE" 2>/dev/null || true
             # Detect stale in-memory version (file on disk is newer than running process)
@@ -10464,11 +10460,18 @@ self_update() {
                     rm -f "$_tmp"
                     return 1
                 fi
-                mkdir -p "$BACKUP_DIR"
-                cp "${INSTALL_DIR}/mtproxymax" \
-                   "${BACKUP_DIR}/mtproxymax.v${VERSION}.$(date +%s)" 2>/dev/null || true
+                if ! mkdir -p "$BACKUP_DIR" || ! cp -p "${INSTALL_DIR}/mtproxymax" \
+                   "${BACKUP_DIR}/mtproxymax.v${VERSION}.$(date +%s)"; then
+                    log_error "Cannot back up installed manager; refusing to replace script"
+                    rm -f "$_tmp"
+                    return 1
+                fi
                 chmod +x "$_tmp"
-                mv "$_tmp" "${INSTALL_DIR}/mtproxymax"
+                if ! mv "$_tmp" "${INSTALL_DIR}/mtproxymax"; then
+                    log_error "Unable to install verified manager script"
+                    rm -f "$_tmp"
+                    return 1
+                fi
                 log_success "Script updated to v${_new_ver:-?}"
                 _script_updated=true
                 _SCRIPT_NEEDS_REEXEC=true
@@ -10476,9 +10479,13 @@ self_update() {
 
                 # Save new commit SHA as baseline
                 local _new_sha
-                _new_sha=$(curl -fsSL --connect-timeout 5 --max-time 10 \
-                    "https://api.github.com/repos/${GITHUB_REPO}/commits/main" \
-                    -H "Accept: application/vnd.github.sha" 2>/dev/null) || true
+                if [ -n "$_expected_script_sha" ]; then
+                    _new_sha="$_update_ref"
+                else
+                    _new_sha=$(curl -fsSL --connect-timeout 5 --max-time 10 \
+                        "https://api.github.com/repos/${GITHUB_REPO}/commits/main" \
+                        -H "Accept: application/vnd.github.sha" 2>/dev/null) || true
+                fi
                 if [ -n "$_new_sha" ] && [ ${#_new_sha} -ge 40 ]; then
                     _new_sha="${_new_sha:0:40}"
                     case "$_new_sha" in
