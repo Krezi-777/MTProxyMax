@@ -9735,6 +9735,82 @@ upgrade_proxy_container_with_rollback() {
     log_warn "Previous container and config restored successfully; engine update aborted"
     return 1
 }
+
+# Coordinated upgrade: running secondary instances only, with group rollback.
+upgrade_all_proxy_instances_with_rollback() {
+    local original image snapshot i name port old cfg id restarts n failed=0
+    local original_port="$PROXY_PORT" original_metrics="$PROXY_METRICS_PORT"
+    local -a names=() ports=() metrics=() ids=() backups=()
+    is_proxy_running || return 1
+    original=$(docker inspect -f '{{.Id}}' "$CONTAINER_NAME") || return 1
+    image=$(get_docker_image) || return 1
+    docker image inspect "$image" >/dev/null 2>&1 || return 1
+    snapshot=$(mktemp -d "$CONFIG_DIR/.group-rollback.XXXXXX") || return 1
+    cp -p "$CONFIG_DIR/config.toml" "$snapshot/primary.toml" || return 1
+    load_instances || return 1
+    for i in "${!INSTANCE_PORTS[@]}"; do
+        [ "${INSTANCE_ENABLED[$i]}" = true ] || continue
+        port="${INSTANCE_PORTS[$i]}"
+        name="mtproxymax-$port"
+        _instance_container_running "$name" || continue
+        cp -p "$CONFIG_DIR/config-$port.toml" "$snapshot/$port.toml" || return 1
+        names+=("$name"); ports+=("$port"); metrics+=("${INSTANCE_METRICS_PORTS[$i]}")
+        ids+=("$(docker inspect -f '{{.Id}}' "$name")")
+    done
+    if ! upgrade_proxy_container_with_rollback; then rm -rf "$snapshot"; return 1; fi
+    for i in "${!names[@]}"; do
+        name="${names[$i]}"; port="${ports[$i]}"
+        old="$name-rollback-$(date +%s)-$BASHPID"
+        if ! docker update --restart=no "$name" >/dev/null 2>&1 ||
+           ! docker stop --timeout 10 "$name" >/dev/null 2>&1 ||
+           ! docker rename "$name" "$old" >/dev/null 2>&1; then failed=1; break; fi
+        backups[$i]="$old"
+        PROXY_PORT="$port"; PROXY_METRICS_PORT="${metrics[$i]}"
+        cfg="$CONFIG_DIR/config-$port.toml"
+        if ! TELEMT_SECONDARY_INSTANCE=true generate_telemt_config "$cfg"; then failed=1; break; fi
+        PROXY_PORT="$original_port"; PROXY_METRICS_PORT="$original_metrics"
+        if ! docker run -d --name "$name" --restart unless-stopped --network host \
+          --ulimit nofile=65535:65535 --log-opt max-size=10m --log-opt max-file=3 \
+          -v "$CONFIG_DIR:/etc/telemt:ro" "$image" "/etc/telemt/config-$port.toml" >/dev/null; then failed=1; break; fi
+        id=$(docker inspect -f '{{.Id}}' "$name") || { failed=1; break; }
+        restarts=$(docker inspect -f '{{.RestartCount}}' "$name") || { failed=1; break; }
+        for n in 1 2 3 4 5 6; do
+            sleep 1
+            if ! _instance_container_running "$name" ||
+               [ "$(docker inspect -f '{{.Id}}' "$name" 2>/dev/null)" != "$id" ] ||
+               [ "$(docker inspect -f '{{.RestartCount}}' "$name" 2>/dev/null)" != "$restarts" ]; then failed=1; break; fi
+        done
+        [ "$failed" = 0 ] || break
+    done
+    PROXY_PORT="$original_port"; PROXY_METRICS_PORT="$original_metrics"
+    if [ "$failed" = 0 ]; then rm -rf "$snapshot"; return 0; fi
+    for ((i=${#names[@]}-1;i>=0;i--)); do
+        name="${names[$i]}"; port="${ports[$i]}"
+        if [ -n "${backups[$i]:-}" ]; then
+            docker rm -f "$name" >/dev/null 2>&1 || true
+            cp -p "$snapshot/$port.toml" "$CONFIG_DIR/config-$port.toml" || failed=2
+            docker rename "${backups[$i]}" "$name" >/dev/null 2>&1 || failed=2
+        fi
+        if [ "$(docker inspect -f '{{.Id}}' "$name" 2>/dev/null)" = "${ids[$i]}" ]; then
+            docker update --restart=unless-stopped "$name" >/dev/null 2>&1 || failed=2
+            docker start "$name" >/dev/null 2>&1 || failed=2
+        else failed=2; fi
+    done
+    old=$(docker inspect -f '{{.Name}}' "$original" 2>/dev/null)
+    old="${old#/}"
+    cp -p "$snapshot/primary.toml" "$CONFIG_DIR/config.toml" || failed=2
+    if [ -n "$old" ] && [ "$old" != "$CONTAINER_NAME" ]; then
+        docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+        docker rename "$old" "$CONTAINER_NAME" >/dev/null 2>&1 || failed=2
+        docker update --restart=unless-stopped "$CONTAINER_NAME" >/dev/null 2>&1 || failed=2
+        docker start "$CONTAINER_NAME" >/dev/null 2>&1 || failed=2
+    else failed=2; fi
+    if [ "$failed" = 2 ]; then
+        log_error "Group rollback incomplete; retained snapshots at $snapshot"
+    else rm -rf "$snapshot"; fi
+    return 1
+}
+
 restart_proxy_container() {
     stop_proxy_container 2>/dev/null || true
     docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
@@ -10596,7 +10672,7 @@ self_update() {
             # Do not delete rollback images when restart fails or the new
             # container is not running. The old container may have already been
             # removed by restart_proxy_container; recovery still needs validation.
-            if ! upgrade_proxy_container_with_rollback || ! is_proxy_running; then
+            if ! upgrade_all_proxy_instances_with_rollback || ! is_proxy_running; then
                 # The build function updates the marker before restart succeeds.
                 # Restore the old marker so the next attempt doesn't report a
                 # broken replacement as the installed version.
