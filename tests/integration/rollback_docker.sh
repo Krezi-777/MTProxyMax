@@ -42,7 +42,7 @@ is_proxy_running() {
 # Fault injection is limited to one Docker rename on the current test's rollback path.
 docker() {
     if [ "${FAULT_RESTORE_RENAME:-0}" = "1" ] &&
-       [ "$1" = rename ] && [[ "$2" == *-rollback-* ]]; then
+       [ "$1" = rename ] && [[ "$2" == *-rollback-* ]] && [ "$3" = "$CONTAINER_NAME" ]; then
         echo "INJECTED: rollback rename fails" >&2
         return 1
     fi
