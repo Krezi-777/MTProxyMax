@@ -9679,8 +9679,22 @@ upgrade_proxy_container_with_rollback() {
 
     # run_proxy_container builds/creates the replacement using the selected image.
     if run_proxy_container && is_proxy_running; then
-        sleep 3
-        if is_proxy_running; then
+        # Reject short-lived "running" states and Docker restart loops.
+        local _stable=true _initial_id _initial_restarts _check_id _check_restarts
+        _initial_id=$(docker inspect -f '{{.Id}}' "$CONTAINER_NAME" 2>/dev/null) || _stable=false
+        _initial_restarts=$(docker inspect -f '{{.RestartCount}}' "$CONTAINER_NAME" 2>/dev/null) || _stable=false
+        local _probe
+        for _probe in 1 2 3 4 5 6; do
+            sleep 1
+            is_proxy_running || { _stable=false; break; }
+            _check_id=$(docker inspect -f '{{.Id}}' "$CONTAINER_NAME" 2>/dev/null) || { _stable=false; break; }
+            _check_restarts=$(docker inspect -f '{{.RestartCount}}' "$CONTAINER_NAME" 2>/dev/null) || { _stable=false; break; }
+            if [ "$_check_id" != "$_initial_id" ] || [ "$_check_restarts" != "$_initial_restarts" ]; then
+                _stable=false
+                break
+            fi
+        done
+        if [ "$_stable" = true ] && is_proxy_running; then
             [ -z "$_cfg_snapshot" ] || rm -f "$_cfg_snapshot"
             _start_all_instances 2>/dev/null || true
             apply_firewall_rules 2>/dev/null || true
