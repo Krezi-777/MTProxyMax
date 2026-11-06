@@ -1,0 +1,183 @@
+#!/usr/bin/env bash
+# REAL manager launch and config generation on an ephemeral GitHub-hosted runner.
+# No production configuration, Docker remote context, or deployment permitted.
+set -eo pipefail
+cd "$(dirname "$0")/../.."
+test -n "${GITHUB_ACTIONS:-}" || { echo 'GitHub Actions only'; exit 1; }
+test "${DOCKER_HOST:-}" = "" || { echo 'Remote Docker hosts not permitted'; exit 1; }
+test "$(docker context show)" = default || { echo 'Unexpected Docker context'; exit 1; }
+test "$(id -u)" -ne 0 || { echo 'Run as ordinary GitHub runner user'; exit 1; }
+docker info >/dev/null
+
+repo="$PWD"
+base="$RUNNER_TEMP/mtproxy-real-manager-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+CONFIG_DIR="$base/config"
+INSTALL_DIR="$base/install"
+CONTAINER_NAME="mtproxy-real-manager-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+haproxy_name="$CONTAINER_NAME-haproxy"
+DOCKER_IMAGE_BASE=mtproxymax-telemt
+TELEMT_MIN_VERSION=3.5.16
+TELEMT_COMMIT=84e5b82
+PROXY_PORT=19080
+PROXY_METRICS_PORT=19190
+PROXY_DOMAIN=example.org
+PROXY_BIND_IPV4=127.0.0.1
+PROXY_BIND_IPV6=::1
+PROXY_PROTOCOL=false
+PROXY_PROTOCOL_TRUSTED_CIDRS=""
+PROXY_CPUS=""
+PROXY_MEMORY=""
+CLIENT_MSS=""
+MASKING_ENABLED=false
+MASKING_HOST=""
+MASKING_PORT=443
+CUSTOM_IP=""
+AD_TAG=""
+COVER_SHIELD_ENABLED=false
+FAKE_CERT_LEN=2048
+STEALTH_PRESET=normal
+QUOTA_ENFORCEMENT_MODE=manager
+UNKNOWN_SNI_ACTION=reject
+declare -a SECRETS_LABELS=(smoke_test)
+declare -a SECRETS_KEYS=(0123456789abcdef0123456789abcdef)
+declare -a SECRETS_ENABLED=(true)
+declare -a SECRETS_MAX_CONNS=(0) SECRETS_MAX_IPS=(0) SECRETS_QUOTA=(0)
+declare -a SECRETS_EXPIRES=(0) SECRETS_AD_TAGS=("")
+declare -a UPSTREAM_NAMES=() UPSTREAM_ENABLED=() UPSTREAM_TYPES=() UPSTREAM_WEIGHTS=()
+declare -a UPSTREAM_ADDRS=() UPSTREAM_USERS=() UPSTREAM_PASSES=() UPSTREAM_IFACES=()
+BOLD="" DIM="" NC="" CYAN=""
+mkdir -p "$CONFIG_DIR" "$INSTALL_DIR"
+printf '3.5.16-84e5b82\n' > "$INSTALL_DIR/.telemt_version"
+
+cleanup() {
+    command docker rm -f "$CONTAINER_NAME" "$haproxy_name" >/dev/null 2>&1 || true
+    local name
+    while IFS= read -r name; do
+        case "$name" in
+            "$CONTAINER_NAME-rollback-"*) command docker rm -f "$name" >/dev/null 2>&1 || true ;;
+        esac
+    done < <(command docker ps -a --format '{{.Names}}' || true)
+    rm -rf "$base"
+}
+trap cleanup EXIT
+
+# Extract exact production functions; all privileged host-dependent helpers are
+# stubbed. The real Docker launch flags, real image selection, and real TOML
+# generator remain intact.
+fn="$base/production-functions.sh"
+for item in 'get_telemt_version() {' 'get_docker_image() {' \
+            'generate_telemt_config() {' 'run_proxy_container() {' \
+            'upgrade_proxy_container_with_rollback() {'; do
+    awk -v header="$item" '
+        $0==header {active=1}
+        active {print}
+        active && $0=="}" {exit}
+    ' "$repo/mtproxymax.sh" >> "$fn"
+done
+source "$fn"
+for required in get_telemt_version get_docker_image generate_telemt_config run_proxy_container upgrade_proxy_container_with_rollback; do
+    declare -f "$required" >/dev/null || { echo "Missing real function $required" >&2; exit 1; }
+done
+_mktemp() { mktemp "$1/.mtproxymax.XXXXXX"; }
+get_enabled_labels_quoted() { printf '"smoke_test"'; }
+_emit_tunings_for_section() { :; }
+build_telemt_image() { command docker image inspect "$DOCKER_IMAGE_BASE:$TELEMT_MIN_VERSION-$TELEMT_COMMIT" >/dev/null; }
+log_info() { echo "INFO: $*"; }
+log_warn() { echo "WARN: $*" >&2; }
+log_error() { echo "ERROR: $*" >&2; }
+log_success() { echo "INFO: $*"; }
+get_public_ip() { :; }
+is_proxy_running() { [ "$(command docker inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null || true)" = true ]; }
+is_port_available() { :; }
+traffic_tracking_setup() { :; }
+geoblock_reapply_all() { :; }
+bans_reapply() { :; }
+maintenance_reapply() { :; }
+_startup_warnings() { :; }
+telegram_notify_proxy_started() { :; }
+flush_traffic_to_disk() { :; }
+_start_all_instances() { :; }
+apply_firewall_rules() { :; }
+speed_limit_apply() { :; }
+# The actual run_proxy_container uses docker run. Fault injection intercepts only
+# a launch command; no systemctl restart or daemon recovery path is triggered.
+docker() {
+    if [ "${FAIL_DOCKER_RUN:-0}" = 1 ] && [ "$1" = run ]; then
+        echo "intentional isolated launch failure" >&2
+        return 51
+    fi
+    command docker "$@"
+}
+
+command docker tag telemt:fullstack-test "$DOCKER_IMAGE_BASE:$TELEMT_MIN_VERSION-$TELEMT_COMMIT"
+command docker pull haproxy:3.1-alpine >/dev/null
+cat > "$base/haproxy.cfg" <<'EOF'
+global
+    maxconn 100
+defaults
+    mode tcp
+    timeout connect 2s
+    timeout client 10s
+    timeout server 10s
+frontend incoming
+    bind 127.0.0.1:19081
+    default_backend telemt
+backend telemt
+    option tcp-check
+    server engine 127.0.0.1:19080 check inter 1s fall 2 rise 2
+listen stats
+    bind 127.0.0.1:18404
+    mode http
+    stats enable
+    stats uri /stats
+EOF
+command docker run -d --name "$haproxy_name" --network host \
+    -v "$base/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro" \
+    haproxy:3.1-alpine >/dev/null
+
+health() {
+    python3 - <<'PY'
+import csv,io,socket,time,urllib.request
+for attempt in range(25):
+    try:
+        with socket.create_connection(('127.0.0.1',19081),timeout=2): pass
+        response=urllib.request.urlopen('http://127.0.0.1:18404/stats;csv',timeout=2).read().decode()
+        rows=list(csv.DictReader(io.StringIO(response.lstrip('# '))))
+        assert any(row.get('pxname')=='telemt' and row.get('svname')=='engine' and row.get('status')=='UP' for row in rows)
+        break
+    except Exception:
+        time.sleep(1)
+else:
+    raise SystemExit('HAProxy backend not healthy')
+PY
+}
+run_proxy_container
+is_proxy_running
+health
+test "$(command docker inspect -f '{{.HostConfig.NetworkMode}}' "$CONTAINER_NAME")" = host
+test "$(command docker inspect -f '{{.Config.Image}}' "$CONTAINER_NAME")" = "$DOCKER_IMAGE_BASE:$TELEMT_MIN_VERSION-$TELEMT_COMMIT"
+old_id="$(command docker inspect -f '{{.Id}}' "$CONTAINER_NAME")"
+old_sha="$(sha256sum "$CONFIG_DIR/config.toml" | cut -d' ' -f1)"
+echo '  PASS: genuine manager run_proxy_container and generate_telemt_config with host networking'
+
+FAIL_DOCKER_RUN=1
+if upgrade_proxy_container_with_rollback; then
+    echo 'FAIL: broken replacement unexpectedly accepted' >&2; exit 1
+fi
+FAIL_DOCKER_RUN=0
+is_proxy_running
+test "$(command docker inspect -f '{{.Id}}' "$CONTAINER_NAME")" = "$old_id"
+test "$(sha256sum "$CONFIG_DIR/config.toml" | cut -d' ' -f1)" = "$old_sha"
+health
+echo '  PASS: genuine launch failure restored original container and config with HAProxy UP'
+
+upgrade_proxy_container_with_rollback
+is_proxy_running
+new_id="$(command docker inspect -f '{{.Id}}' "$CONTAINER_NAME")"
+test "$new_id" != "$old_id"
+backup="$(command docker ps -a --format '{{.Names}}' | grep -E "^$CONTAINER_NAME-rollback-" | head -n1)"
+test -n "$backup"
+test "$(command docker inspect -f '{{.Id}}' "$backup")" = "$old_id"
+health
+echo '  PASS: genuine manager upgrade retained old container and HAProxy remained UP'
+echo 'PASS: production launch path and rollback on isolated GitHub runner (3/3)'
