@@ -69,7 +69,7 @@ trap cleanup EXIT
 fn="$base/production-functions.sh"
 for item in 'get_telemt_version() {' 'get_docker_image() {' \
             'generate_telemt_config() {' 'run_proxy_container() {' \
-            '_start_all_instances() {' 'upgrade_proxy_container_with_rollback() {' \
+            '_start_all_instances() {' '_instance_container_running() {' 'upgrade_proxy_container_with_rollback() {' \
             'upgrade_all_proxy_instances_with_rollback() {'; do
     awk -v header="$item" '
         $0==header {active=1}
