@@ -10,7 +10,8 @@ pinned_commit='496ae9f19e78f8e6095cbd14ff23c1bd9c2adaed'
 real_sha="$(sha256sum "$repo/mtproxymax.sh" | cut -d' ' -f1)"
 
 verify_case() (
-    local mode="$1" dir="$tmp/$mode"
+    local mode="$1"
+    local dir="$tmp/$mode"
     mkdir -p "$dir/install" "$dir/backups"
     INSTALL_DIR="$dir/install"
     BACKUP_DIR="$dir/backups"
