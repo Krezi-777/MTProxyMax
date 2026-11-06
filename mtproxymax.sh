@@ -9632,6 +9632,8 @@ start_proxy_container() {
 # A successful update leaves the old stopped container available for manual rollback.
 upgrade_proxy_container_with_rollback() {
     local _old_container="${CONTAINER_NAME}-rollback-$(date +%s)-${BASHPID}"
+    local _cfg_file="${CONFIG_DIR}/config.toml"
+    local _cfg_snapshot="" _cfg_existed=false _cfg_restore_ok=true
     if ! is_proxy_running; then
         log_error "Cannot perform protected upgrade: original container is not running"
         return 1
@@ -9640,28 +9642,45 @@ upgrade_proxy_container_with_rollback() {
         log_error "Rollback container name already exists"
         return 1
     fi
+    # run_proxy_container regenerates config.toml. A container rollback without
+    # restoring that file would leave the previous image with the new settings.
+    if [ -f "$_cfg_file" ]; then
+        _cfg_existed=true
+        _cfg_snapshot=$(mktemp "${CONFIG_DIR}/.config-rollback.XXXXXX") || {
+            log_error "Cannot allocate config rollback snapshot"
+            return 1
+        }
+        if ! cp -p "$_cfg_file" "$_cfg_snapshot"; then
+            rm -f "$_cfg_snapshot"
+            log_error "Cannot snapshot config before upgrade"
+            return 1
+        fi
+    fi
     flush_traffic_to_disk 2>/dev/null || true
     if ! docker update --restart=no "$CONTAINER_NAME" >/dev/null 2>&1; then
+        [ -z "$_cfg_snapshot" ] || rm -f "$_cfg_snapshot"
         log_error "Unable to disable old container restart policy; aborting upgrade"
         return 1
     fi
     if ! docker stop --timeout 10 "$CONTAINER_NAME" >/dev/null 2>&1; then
+        [ -z "$_cfg_snapshot" ] || rm -f "$_cfg_snapshot"
         docker update --restart=unless-stopped "$CONTAINER_NAME" >/dev/null 2>&1 || true
         log_error "Unable to stop old container; aborting upgrade"
         return 1
     fi
     if ! docker rename "$CONTAINER_NAME" "$_old_container"; then
+        [ -z "$_cfg_snapshot" ] || rm -f "$_cfg_snapshot"
         docker update --restart=unless-stopped "$CONTAINER_NAME" >/dev/null 2>&1 || true
         docker start "$CONTAINER_NAME" >/dev/null 2>&1 || true
         log_error "Unable to retain rollback container; aborting upgrade"
         return 1
     fi
 
-    # run_proxy_container uses the newly built version marker and creates a
-    # fresh container under the original name. The old one is kept separately.
+    # run_proxy_container builds/creates the replacement using the selected image.
     if run_proxy_container && is_proxy_running; then
         sleep 3
         if is_proxy_running; then
+            [ -z "$_cfg_snapshot" ] || rm -f "$_cfg_snapshot"
             _start_all_instances 2>/dev/null || true
             apply_firewall_rules 2>/dev/null || true
             speed_limit_apply 2>/dev/null || true
@@ -9671,6 +9690,19 @@ upgrade_proxy_container_with_rollback() {
     fi
 
     log_warn "New container did not start reliably; restoring previous container"
+    # Restore config before starting the old container; replace atomically
+    # on the same filesystem to avoid a partial TOML read.
+    if [ "$_cfg_existed" = true ]; then
+        if ! mv -f "$_cfg_snapshot" "$_cfg_file"; then
+            _cfg_restore_ok=false
+            log_error "Unable to restore previous Telemt config from $_cfg_snapshot"
+        fi
+    else
+        if ! rm -f "$_cfg_file"; then
+            _cfg_restore_ok=false
+            log_error "Unable to remove generated config during rollback"
+        fi
+    fi
     docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
     if ! docker rename "$_old_container" "$CONTAINER_NAME"; then
         log_error "Automatic rollback failed: old container remains named $_old_container"
@@ -9681,10 +9713,13 @@ upgrade_proxy_container_with_rollback() {
         log_error "Automatic rollback failed to start previous container"
         return 1
     fi
-    log_warn "Previous container restored successfully; engine update aborted"
+    if [ "$_cfg_restore_ok" != true ]; then
+        log_error "Previous container started but original config was not restored"
+        return 1
+    fi
+    log_warn "Previous container and config restored successfully; engine update aborted"
     return 1
 }
-
 restart_proxy_container() {
     stop_proxy_container 2>/dev/null || true
     docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
