@@ -51,7 +51,7 @@ check_case() (
         printf 'docker %s\n' "$*" >> "$work/calls"
         case "$1" in
             inspect)
-                [ "$2" != "$backup_name" ] || [ -z "$backup_name" ] ;;
+                return 1 ;;
             update) return 0 ;;
             stop)
                 [ "$scenario" != "stop-fails" ] || return 1
