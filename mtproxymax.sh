@@ -10463,20 +10463,10 @@ self_update() {
                 return 1
             fi
         fi
-        # Clean up old engine images (keep only the current version + latest)
-        local _old_img
-        while IFS= read -r _old_img; do
-            [ -z "$_old_img" ] && continue
-            [[ "$_old_img" == *":${_expected_ver}" ]] && continue
-            [[ "$_old_img" == *":latest" ]] && continue
-            docker rmi "$_old_img" 2>/dev/null && log_info "Removed old image: ${_old_img}"
-        done <<< "$(docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep "^${DOCKER_IMAGE_BASE}:")"
-        # Also clean registry-prefixed copies
-        while IFS= read -r _old_img; do
-            [ -z "$_old_img" ] && continue
-            [[ "$_old_img" == *":${_expected_ver}" ]] && continue
-            docker rmi "$_old_img" 2>/dev/null || true
-        done <<< "$(docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep "^${REGISTRY_IMAGE}:")"
+        # Do not remove old engine images automatically. A successful process
+        # restart is not enough to prove sustained availability or HAProxy
+        # connectivity, and the previous image is required for rollback.
+        log_info "Keeping previous telemt images for rollback; cleanup must be explicit"
     fi
 }
 
