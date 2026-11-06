@@ -68,11 +68,11 @@ The full-stack integration runs the actual `run_proxy_container()`, `generate_te
 
 ## Independent source verification
 
-The manager file `mtproxymax.sh` has SHA-256 `aa527da3314d29ec9ed5e59ca09a1e0c96d1fd5db397c5f705c4831cce1abf7e`, verified in [GitHub Actions run 42219216246](https://github.com/Krezi-777/MTProxyMax/actions/runs/42219216246). The isolated runner checked `sha256sum` for both checked-out content and an immutable raw GitHub HTTPS download, plus byte equality and `bash -n`. This does not prove code security, artifact signing, clean installation or Telegram connectivity. Installer and future package digest acceptance remain open.
+The manager file `mtproxymax.sh` has SHA-256 `aa527da3314d29ec9ed5e59ca09a1e0c96d1fd5db397c5f705c4831cce1abf7e`, verified in [GitHub Actions run 42219216246](https://github.com/Krezi-777/MTProxyMax/actions/runs/42219216246). The isolated runner checked `sha256sum` for both checked-out content and an immutable raw GitHub HTTPS download, plus byte equality and `bash -n`. The immutable installer `install.sh` has SHA-256 `c04916744e494fadd13d8c4797feb68d9014f1b7e11737c49d089789b4198cba`, additionally verified through a raw HTTPS download, byte equality and `sha256sum` in [run 42219426404](https://github.com/Krezi-777/MTProxyMax/actions/runs/42219426404). This does not prove code security, artifact signing, clean installation or Telegram connectivity. Future package digest acceptance and clean-install acceptance remain open.
 
 ## Stage 19 documentation and provenance status
 
 - [Release candidate overview](RELEASE_CANDIDATE.md) is a **draft page in the development branch**, not a published GitHub Release.
 - [Conservative group upgrade recovery runbook](GROUP_UPGRADE_RECOVERY_RUNBOOK.md) documents read-only evidence gathering, staged reconciliation and the manual-recovery limitation.
-- The manager file digest is independently verified on an immutable source revision. The branch still has no designated final release tag, approved installer/package digest or public install command. The documentation commits themselves must pass CI before any release review.
+- The manager file digest is independently verified on an immutable source revision. The branch still has no designated final release tag, approved release-package digest or public install command; both source-script hashes are independently checked. The documentation commits themselves must pass CI before any release review.
 - **Decision:** Stage 19 preparation is in progress. Keep PR Draft, no publish, no main merge, no production upgrade.
