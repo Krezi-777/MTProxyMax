@@ -1189,7 +1189,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends git && \
     rm -rf /var/lib/apt/lists/*
 RUN git clone "https://github.com/telemt/telemt.git" /build
 WORKDIR /build
-RUN git checkout --detach "${TELEMT_COMMIT}" && test "$(git rev-parse HEAD | cut -c1-7)" = "${TELEMT_COMMIT:0:7}"
+RUN git checkout --detach "${TELEMT_COMMIT}" && test "$(git rev-parse HEAD | cut -c1-7)" = "$(printf '%.7s' "$TELEMT_COMMIT")"
 ENV CARGO_PROFILE_RELEASE_LTO=true CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 CARGO_PROFILE_RELEASE_DEBUG=false
 RUN cargo build --release --locked && \
     (strip target/release/telemt 2>/dev/null || true) && \
@@ -10369,6 +10369,12 @@ self_update() {
                 log_info "Skipped"
                 rm -f "$_tmp"
             else
+                # Fork safety: never overwrite modified script with upstream by default.
+                if [ "${MTPROXYMAX_ALLOW_UPSTREAM_OVERWRITE:-0}" != "1" ]; then
+                    log_error "Upstream script replacement disabled in this fork. Set MTPROXYMAX_ALLOW_UPSTREAM_OVERWRITE=1 only to opt in explicitly."
+                    rm -f "$_tmp"
+                    return 1
+                fi
                 mkdir -p "$BACKUP_DIR"
                 cp "${INSTALL_DIR}/mtproxymax" \
                    "${BACKUP_DIR}/mtproxymax.v${VERSION}.$(date +%s)" 2>/dev/null || true
@@ -10429,7 +10435,10 @@ self_update() {
         log_success "Telemt engine is up to date (v${_current_ver})"
     else
         log_info "Engine update: v${_current_ver} -> v${_expected_ver}"
-        build_telemt_image true
+        if ! build_telemt_image true; then
+            log_error "Telemt image update failed; preserving the existing running container and old images"
+            return 1
+        fi
         if is_proxy_running; then
             load_secrets
             restart_proxy_container
