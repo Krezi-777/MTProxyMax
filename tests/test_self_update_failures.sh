@@ -69,7 +69,7 @@ run_failure_case() (
         return 0
     }
     load_secrets() { echo "load-secrets" >> "$dir/calls"; }
-    restart_proxy_container() {
+    upgrade_proxy_container_with_rollback() {
         echo "restart" >> "$dir/calls"
         : > "$dir/restart-attempted"
         [ "$scenario" != "restart-failure" ]
