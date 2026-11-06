@@ -9738,11 +9738,12 @@ upgrade_proxy_container_with_rollback() {
 
 # Coordinated upgrade: running secondary instances only, with group rollback.
 upgrade_all_proxy_instances_with_rollback() {
-    local original image snapshot i name port old cfg id restarts n failed=0
+    local original image snapshot i name port old cfg id restarts n failed=0 original_policy
     local original_port="$PROXY_PORT" original_metrics="$PROXY_METRICS_PORT"
-    local -a names=() ports=() metrics=() ids=() backups=()
+    local -a names=() ports=() metrics=() ids=() backups=() policies=()
     is_proxy_running || return 1
     original=$(docker inspect -f '{{.Id}}' "$CONTAINER_NAME") || return 1
+    original_policy=$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$CONTAINER_NAME") || return 1
     image=$(get_docker_image) || return 1
     docker image inspect "$image" >/dev/null 2>&1 || return 1
     snapshot=$(mktemp -d "$CONFIG_DIR/.group-rollback.XXXXXX") || return 1
@@ -9756,6 +9757,7 @@ upgrade_all_proxy_instances_with_rollback() {
         cp -p "$CONFIG_DIR/config-$port.toml" "$snapshot/$port.toml" || return 1
         names+=("$name"); ports+=("$port"); metrics+=("${INSTANCE_METRICS_PORTS[$i]}")
         ids+=("$(docker inspect -f '{{.Id}}' "$name")")
+        policies+=("$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$name")")
     done
     if ! upgrade_proxy_container_with_rollback; then rm -rf "$snapshot"; return 1; fi
     for i in "${!names[@]}"; do
@@ -9792,7 +9794,7 @@ upgrade_all_proxy_instances_with_rollback() {
             docker rename "${backups[$i]}" "$name" >/dev/null 2>&1 || failed=2
         fi
         if [ "$(docker inspect -f '{{.Id}}' "$name" 2>/dev/null)" = "${ids[$i]}" ]; then
-            docker update --restart=unless-stopped "$name" >/dev/null 2>&1 || failed=2
+            docker update --restart="${policies[$i]:-unless-stopped}" "$name" >/dev/null 2>&1 || failed=2
             docker start "$name" >/dev/null 2>&1 || failed=2
         else failed=2; fi
     done
@@ -9802,7 +9804,7 @@ upgrade_all_proxy_instances_with_rollback() {
     if [ -n "$old" ] && [ "$old" != "$CONTAINER_NAME" ]; then
         docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
         docker rename "$old" "$CONTAINER_NAME" >/dev/null 2>&1 || failed=2
-        docker update --restart=unless-stopped "$CONTAINER_NAME" >/dev/null 2>&1 || failed=2
+        docker update --restart="${original_policy:-unless-stopped}" "$CONTAINER_NAME" >/dev/null 2>&1 || failed=2
         docker start "$CONTAINER_NAME" >/dev/null 2>&1 || failed=2
     else failed=2; fi
     if [ "$failed" = 2 ]; then
