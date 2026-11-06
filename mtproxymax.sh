@@ -17245,7 +17245,7 @@ instance_add() {
     local _orig_port="$PROXY_PORT" _orig_mport="$PROXY_METRICS_PORT"
     PROXY_PORT="$port"
     PROXY_METRICS_PORT="$mport"
-    generate_telemt_config "$inst_config"
+    TELEMT_SECONDARY_INSTANCE=true generate_telemt_config "$inst_config"
     PROXY_PORT="$_orig_port"
     PROXY_METRICS_PORT="$_orig_mport"
 
