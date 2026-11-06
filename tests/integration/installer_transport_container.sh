@@ -13,26 +13,26 @@ docker run --rm --network bridge --tmpfs /tmp:rw,size=32m,mode=1777 \
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq >/dev/null
     apt-get install -y -qq curl ca-certificates coreutils >/dev/null
-    mkdir -p /tmp/fakebin
-    cat > /tmp/fakebin/bash <<"WRAPPER"
-#!/bin/sh
-if [ "$1" = "-n" ]; then
-    exec /bin/bash "$@"
-fi
-if [ "${2:-}" = "install" ]; then
-    sha256sum "$1" | grep -q "^${MTPROXYMAX_SOURCE_SHA256} "
-    printf "%s\n" "Manager handoff intercepted after verified immutable download"
-    touch /tmp/install-verified
-    exit 0
-fi
-exec /bin/bash "$@"
-WRAPPER
-    chmod +x /tmp/fakebin/bash
-    export PATH=/tmp/fakebin:/usr/bin:/bin
-    bash /sandbox/install.sh
+    # Exported shell function takes precedence over PATH lookup in the child
+    # bash process. It intercepts the exact verified manager execution.
+    bash() {
+        if [ "$1" = "-n" ]; then
+            /bin/bash "$@"
+            return $?
+        fi
+        if [ "${2:-}" = "install" ]; then
+            sha256sum "$1" | grep -q "^${MTPROXYMAX_SOURCE_SHA256} "
+            echo "Manager execution intercepted after checksum validation"
+            touch /tmp/install-verified
+            return 0
+        fi
+        /bin/bash "$@"
+    }
+    export -f bash
+    /bin/bash /sandbox/install.sh
     test -f /tmp/install-verified
     rm -f /tmp/install-verified
-    if MTPROXYMAX_SOURCE_SHA256="$(printf "0%.0s" {1..64})" bash /sandbox/install.sh >/tmp/bad-hash.log 2>&1; then
+    if MTPROXYMAX_SOURCE_SHA256="$(printf "0%.0s" {1..64})" /bin/bash /sandbox/install.sh >/tmp/bad-hash.log 2>&1; then
         echo "FAIL: installer accepted deliberately wrong digest" >&2
         exit 1
     fi
