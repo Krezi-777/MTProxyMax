@@ -16,6 +16,7 @@ source "$fn"
 
 prefix="mtproxy-rollback-ci-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
 scratch="$(mktemp -d)"
+CONFIG_DIR="$scratch"
 cleanup_all() {
     local name
     while IFS= read -r name; do
