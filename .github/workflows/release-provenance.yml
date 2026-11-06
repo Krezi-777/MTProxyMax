@@ -43,6 +43,14 @@ jobs:
           cmp -s "mtproxymax.sh" "${RUNNER_TEMP}/manager-immutable.sh"
           bash -n "${RUNNER_TEMP}/manager-immutable.sh"
           printf 'Verified immutable commit %s\n' "${GITHUB_SHA}"
+          echo "c04916744e494fadd13d8c4797feb68d9014f1b7e11737c49d089789b4198cba  install.sh" | sha256sum --check --status
+          curl --fail --silent --show-error --location --retry 3 \
+            --connect-timeout 10 --max-time 90 \
+            --output "${RUNNER_TEMP}/installer-immutable.sh" \
+            "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/install.sh"
+          echo "c04916744e494fadd13d8c4797feb68d9014f1b7e11737c49d089789b4198cba  ${RUNNER_TEMP}/installer-immutable.sh" | sha256sum --check --status
+          cmp -s "install.sh" "${RUNNER_TEMP}/installer-immutable.sh"
+          bash -n "${RUNNER_TEMP}/installer-immutable.sh"
           sha256sum mtproxymax.sh install.sh
       - name: Validate recovery and release docs
         shell: bash
