@@ -1,0 +1,57 @@
+name: Release Source Provenance (draft)
+
+on:
+  push:
+    branches: [fix/telemt-posix-build]
+    paths:
+      - '.github/workflows/release-provenance.yml'
+      - 'mtproxymax.sh'
+      - 'install.sh'
+      - 'docs/RELEASE_CANDIDATE.md'
+  pull_request:
+    paths:
+      - '.github/workflows/release-provenance.yml'
+      - 'mtproxymax.sh'
+      - 'install.sh'
+      - 'docs/RELEASE_CANDIDATE.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  provenance:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Compare checked-out bytes to raw immutable GitHub source
+        env:
+          EXPECTED_MANAGER_SHA: aa527da3314d29ec9ed5e59ca09a1e0c96d1fd5db397c5f705c4831cce1abf7e
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${#GITHUB_SHA}" -eq 40
+          echo "${EXPECTED_MANAGER_SHA}  mtproxymax.sh" | sha256sum --check --status
+          curl --fail --silent --show-error --location --retry 3 \
+            --connect-timeout 10 --max-time 90 \
+            --output "${RUNNER_TEMP}/manager-immutable.sh" \
+            "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/mtproxymax.sh"
+          echo "${EXPECTED_MANAGER_SHA}  ${RUNNER_TEMP}/manager-immutable.sh" | sha256sum --check --status
+          cmp -s "mtproxymax.sh" "${RUNNER_TEMP}/manager-immutable.sh"
+          bash -n "${RUNNER_TEMP}/manager-immutable.sh"
+          printf 'Verified immutable commit %s\n' "${GITHUB_SHA}"
+          sha256sum mtproxymax.sh install.sh
+      - name: Validate recovery and release docs
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s docs/GROUP_UPGRADE_RECOVERY_RUNBOOK.md
+          test -s docs/RELEASE_CANDIDATE.md
+          test -s docs/RELEASE_READINESS_AUDIT.md
+          test -s docs/DRAFT_RELEASE_NOTES.md
+          grep -Fq 'NOT FOR PRODUCTION INSTALLATION' docs/RELEASE_CANDIDATE.md
+          grep -Fq 'BLOCKED' docs/RELEASE_READINESS_AUDIT.md
+          bash -n install.sh
