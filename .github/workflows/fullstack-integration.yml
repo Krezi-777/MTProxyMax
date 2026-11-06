@@ -67,6 +67,12 @@ jobs:
       - name: Execute full-stack integration on the GitHub runner
         shell: bash
         run: bash tests/fullstack/run.sh
+      - name: Exercise unchanged manager launch path on disposable host network
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n tests/fullstack/real_manager_host.sh
+          bash tests/fullstack/real_manager_host.sh
       - name: Diagnostics on failure
         if: failure()
         run: |
