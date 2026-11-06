@@ -9750,6 +9750,16 @@ upgrade_all_proxy_instances_with_rollback() {
         exec {_upgrade_lock_fd}>&-
         return 1
     fi
+    # A previous interrupted/partial transaction requires reconciliation first.
+    local _pending_snapshot
+    for _pending_snapshot in "${CONFIG_DIR}"/.group-rollback.*; do
+        if [ -d "$_pending_snapshot" ]; then
+            log_error "Unresolved prior group transaction: $_pending_snapshot; manual recovery required"
+            flock -u "$_upgrade_lock_fd" 2>/dev/null || true
+            exec {_upgrade_lock_fd}>&-
+            return 1
+        fi
+    done
     _upgrade_all_proxy_instances_locked || _upgrade_rc=$?
     flock -u "$_upgrade_lock_fd" 2>/dev/null || true
     exec {_upgrade_lock_fd}>&-
@@ -9786,7 +9796,25 @@ _upgrade_all_proxy_instances_locked() {
         ids+=("$(docker inspect -f '{{.Id}}' "$name")")
         policies+=("$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$name")")
     done
-    if ! upgrade_proxy_container_with_rollback; then rm -rf "$snapshot"; return 1; fi
+    # Durable preflight manifest survives interruption until successful completion.
+    {
+        printf 'status=IN_PROGRESS\nprimary_id=%s\nprimary_name=%s\n' "$original" "$CONTAINER_NAME"
+        for i in "${!names[@]}"; do
+            printf 'secondary_name=%s original_id=%s\n' "${names[$i]}" "${ids[$i]}"
+        done
+    } > "$snapshot/RECOVERY.txt" || return 1
+    chmod 600 "$snapshot/RECOVERY.txt" || return 1
+    if ! upgrade_proxy_container_with_rollback; then
+        # Primary's recovery outcome may require manual intervention; keep the
+        # manifest if the original identity did not come back.
+        if [ "$(docker inspect -f '{{.Id}}' "$CONTAINER_NAME" 2>/dev/null)" = "$original" ]; then
+            rm -rf "$snapshot"
+        else
+            printf 'status=PRIMARY_RECOVERY_UNVERIFIED\n' >> "$snapshot/RECOVERY.txt"
+            log_error "Primary recovery unverified; retained snapshots at $snapshot"
+        fi
+        return 1
+    fi
     for i in "${!names[@]}"; do
         name="${names[$i]}"; port="${ports[$i]}"
         old="$name-rollback-$(date +%s)-$BASHPID"
