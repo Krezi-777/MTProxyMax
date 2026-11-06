@@ -9627,6 +9627,64 @@ start_proxy_container() {
     speed_limit_apply 2>/dev/null || true
 }
 
+# Upgrade the primary container while retaining the original Docker container.
+# This path is dedicated to engine updates (not ordinary restart operations).
+# A successful update leaves the old stopped container available for manual rollback.
+upgrade_proxy_container_with_rollback() {
+    local _old_container="${CONTAINER_NAME}-rollback-$(date +%s)-$"
+    if ! is_proxy_running; then
+        log_error "Cannot perform protected upgrade: original container is not running"
+        return 1
+    fi
+    if docker inspect "$_old_container" >/dev/null 2>&1; then
+        log_error "Rollback container name already exists"
+        return 1
+    fi
+    flush_traffic_to_disk 2>/dev/null || true
+    if ! docker update --restart=no "$CONTAINER_NAME" >/dev/null 2>&1; then
+        log_error "Unable to disable old container restart policy; aborting upgrade"
+        return 1
+    fi
+    if ! docker stop --timeout 10 "$CONTAINER_NAME" >/dev/null 2>&1; then
+        docker update --restart=unless-stopped "$CONTAINER_NAME" >/dev/null 2>&1 || true
+        log_error "Unable to stop old container; aborting upgrade"
+        return 1
+    fi
+    if ! docker rename "$CONTAINER_NAME" "$_old_container"; then
+        docker update --restart=unless-stopped "$CONTAINER_NAME" >/dev/null 2>&1 || true
+        docker start "$CONTAINER_NAME" >/dev/null 2>&1 || true
+        log_error "Unable to retain rollback container; aborting upgrade"
+        return 1
+    fi
+
+    # run_proxy_container uses the newly built version marker and creates a
+    # fresh container under the original name. The old one is kept separately.
+    if run_proxy_container && is_proxy_running; then
+        sleep 3
+        if is_proxy_running; then
+            _start_all_instances 2>/dev/null || true
+            apply_firewall_rules 2>/dev/null || true
+            speed_limit_apply 2>/dev/null || true
+            log_info "Old container retained as: $_old_container"
+            return 0
+        fi
+    fi
+
+    log_warn "New container did not start reliably; restoring previous container"
+    docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+    if ! docker rename "$_old_container" "$CONTAINER_NAME"; then
+        log_error "Automatic rollback failed: old container remains named $_old_container"
+        return 1
+    fi
+    docker update --restart=unless-stopped "$CONTAINER_NAME" >/dev/null 2>&1 || true
+    if ! docker start "$CONTAINER_NAME" >/dev/null 2>&1 || ! is_proxy_running; then
+        log_error "Automatic rollback failed to start previous container"
+        return 1
+    fi
+    log_warn "Previous container restored successfully; engine update aborted"
+    return 1
+}
+
 restart_proxy_container() {
     stop_proxy_container 2>/dev/null || true
     docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
@@ -10450,7 +10508,7 @@ self_update() {
             # Do not delete rollback images when restart fails or the new
             # container is not running. The old container may have already been
             # removed by restart_proxy_container; recovery still needs validation.
-            if ! restart_proxy_container || ! is_proxy_running; then
+            if ! upgrade_proxy_container_with_rollback || ! is_proxy_running; then
                 # The build function updates the marker before restart succeeds.
                 # Restore the old marker so the next attempt doesn't report a
                 # broken replacement as the installed version.
