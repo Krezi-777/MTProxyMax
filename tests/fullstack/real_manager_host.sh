@@ -136,7 +136,7 @@ command docker run -d --name "$haproxy_name" --network host \
     haproxy:3.1-alpine >/dev/null
 
 health() {
-    python3 - <<'PY'
+    if python3 - <<'PY'
 import csv,io,socket,time,urllib.request
 for attempt in range(25):
     try:
@@ -150,6 +150,17 @@ for attempt in range(25):
 else:
     raise SystemExit('HAProxy backend not healthy')
 PY
+    then
+        return 0
+    fi
+    echo 'DIAGNOSTICS: real manager network health failed' >&2
+    command docker ps -a --filter "name=$CONTAINER_NAME" >&2 || true
+    command docker logs --tail 80 "$CONTAINER_NAME" >&2 || true
+    command docker logs --tail 80 "$haproxy_name" >&2 || true
+    command ss -ltnp 2>&1 | grep -E '19080|19081|18404|State' >&2 || true
+    curl --max-time 5 --silent --show-error 'http://127.0.0.1:18404/stats;csv' \
+        | grep -E 'telemt,engine|# pxname' >&2 || true
+    return 1
 }
 run_proxy_container
 is_proxy_running
