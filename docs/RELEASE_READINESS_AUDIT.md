@@ -66,9 +66,13 @@ The full-stack integration runs the actual `run_proxy_container()`, `generate_te
 
 **Decision:** Remain Draft. No production changes. The evidence is sufficient for continued development testing, not for public production-ready release claims.
 
+## Independent source verification
+
+The manager file `mtproxymax.sh` has SHA-256 `aa527da3314d29ec9ed5e59ca09a1e0c96d1fd5db397c5f705c4831cce1abf7e`, verified in [GitHub Actions run 42219216246](https://github.com/Krezi-777/MTProxyMax/actions/runs/42219216246). The isolated runner checked `sha256sum` for both checked-out content and an immutable raw GitHub HTTPS download, plus byte equality and `bash -n`. This does not prove code security, artifact signing, clean installation or Telegram connectivity. Installer and future package digest acceptance remain open.
+
 ## Stage 19 documentation and provenance status
 
 - [Release candidate overview](RELEASE_CANDIDATE.md) is a **draft page in the development branch**, not a published GitHub Release.
 - [Conservative group upgrade recovery runbook](GROUP_UPGRADE_RECOVERY_RUNBOOK.md) documents read-only evidence gathering, staged reconciliation and the manual-recovery limitation.
-- The branch has no designated final release tag, independently verified SHA-256 for the exact final manager file, or approved install command. The documentation commits themselves must pass CI before any release review.
+- The manager file digest is independently verified on an immutable source revision. The branch still has no designated final release tag, approved installer/package digest or public install command. The documentation commits themselves must pass CI before any release review.
 - **Decision:** Stage 19 preparation is in progress. Keep PR Draft, no publish, no main merge, no production upgrade.
