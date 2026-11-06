@@ -118,6 +118,8 @@ is_proxy_running() {
 }
 run_proxy_container() {
     if [ "${INJECT_FAILURE:-0}" = 1 ]; then
+        # Simulate the actual manager's config regeneration before a bad launch.
+        printf '\\n# transient replacement config (must roll back)\\n' >> "$config_dir/config.toml"
         command docker run -d --name "$CONTAINER_NAME" --network "$TEST_NETWORK" \
           --entrypoint /bin/does-not-exist telemt:fullstack-test >/dev/null 2>&1
         return $?
