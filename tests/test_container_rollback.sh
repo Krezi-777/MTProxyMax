@@ -60,7 +60,16 @@ check_case() (
                     [ "$new_exists" = true ] || return 1
                     case "${3:-}" in
                         '{{.Id}}') printf 'mock-new-container-id\\n' ;;
-                        '{{.RestartCount}}') printf '0\\n' ;;
+                        '{{.RestartCount}}')
+                            if [ "$scenario" = restart-loop ]; then
+                                local count
+                                count=$(cat "$work/restart-count" 2>/dev/null || echo 0)
+                                count=$((count+1))
+                                printf '%s\n' "$count" > "$work/restart-count"
+                                printf '%s\n' "$count"
+                            else
+                                printf '0\\n'
+                            fi ;;
                         *) return 1 ;;
                     esac
                     return 0
@@ -120,11 +129,11 @@ check_case() (
     printf '  PASS: %s\n' "$scenario"
 )
 
-cases=(success start-fails new-crashes stop-fails rename-fails)
+cases=(success start-fails new-crashes stop-fails rename-fails restart-loop)
 passed=0
 for scenario in "${cases[@]}"; do
     check_case "$scenario"
     passed=$((passed+1))
 done
-test "$passed" -eq 5
-echo 'PASS: protected container upgrade transaction (5/5 scenarios)'
+test "$passed" -eq 6
+echo 'PASS: protected container upgrade transaction (6/6 scenarios)'
