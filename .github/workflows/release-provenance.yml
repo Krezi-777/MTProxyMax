@@ -8,6 +8,7 @@ on:
       - 'mtproxymax.sh'
       - 'install.sh'
       - 'docs/RELEASE_CANDIDATE.md'
+      - 'tests/integration/installer_transport_container.sh'
   pull_request:
     paths:
       - '.github/workflows/release-provenance.yml'
@@ -52,6 +53,12 @@ jobs:
           cmp -s "install.sh" "${RUNNER_TEMP}/installer-immutable.sh"
           bash -n "${RUNNER_TEMP}/installer-immutable.sh"
           sha256sum mtproxymax.sh install.sh
+      - name: Rehearse immutable installer transport in a clean disposable container
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n tests/integration/installer_transport_container.sh
+          bash tests/integration/installer_transport_container.sh
       - name: Validate recovery and release docs
         shell: bash
         run: |
