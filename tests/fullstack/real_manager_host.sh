@@ -241,10 +241,18 @@ after_group_secondary=$(command docker inspect -f '{{.Id}}' "$SECONDARY_CONTAINE
 test "$before_group_secondary" != "$after_group_secondary"
 test "$(command docker inspect -f '{{.State.Running}}' "$SECONDARY_CONTAINER")" = true
 test "$(command docker inspect -f '{{.Id}}' "$CONTAINER_NAME")" != "$new_id"
+python3 - <<'PY'
+import socket
+for port in (19080, 19082):
+    with socket.create_connection(('127.0.0.1', port), timeout=3):
+        pass
+PY
+echo '  PASS: both upgraded Telemt listening ports accept connections'
 echo '  PASS: group upgrade replaced both running instances'
 
 # Inject a failure ONLY on the secondary Docker launch, after the primary
 # replacement succeeds. Both original container IDs must be restored.
+command docker update --restart=always "$CONTAINER_NAME" "$SECONDARY_CONTAINER" >/dev/null
 before_fail_primary=$(command docker inspect -f '{{.Id}}' "$CONTAINER_NAME")
 before_fail_secondary=$(command docker inspect -f '{{.Id}}' "$SECONDARY_CONTAINER")
 before_fail_primary_config=$(sha256sum "$CONFIG_DIR/config.toml" | cut -d' ' -f1)
@@ -264,6 +272,15 @@ test "$(command docker inspect -f '{{.Id}}' "$CONTAINER_NAME")" = "$before_fail_
 test "$(command docker inspect -f '{{.Id}}' "$SECONDARY_CONTAINER")" = "$before_fail_secondary"
 test "$(sha256sum "$CONFIG_DIR/config.toml" | cut -d' ' -f1)" = "$before_fail_primary_config"
 test "$(sha256sum "$CONFIG_DIR/config-19082.toml" | cut -d' ' -f1)" = "$before_fail_secondary_config"
+test "$(command docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$CONTAINER_NAME")" = always
+test "$(command docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$SECONDARY_CONTAINER")" = always
+python3 - <<'PY'
+import socket
+for port in (19080, 19082):
+    with socket.create_connection(('127.0.0.1', port), timeout=3):
+        pass
+PY
 health
+echo '  PASS: failed secondary update preserves restart policies and both listening ports'
 echo '  PASS: failed secondary update restores both original Docker IDs and configs'
 
